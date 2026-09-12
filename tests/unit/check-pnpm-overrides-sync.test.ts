@@ -316,6 +316,61 @@ test("a collapse conflict involving an empty object reports instead of throwing"
   );
 });
 
+// --- regressions from the Codex review gate, second pass ---
+
+// A value deviation replaces npm's range. Without pinning the range it was written
+// against, it swallows every later upstream bump to that pin — including a new security
+// floor — and the gate still reports OK. That is the failure the gate exists to prevent.
+test("a value deviation expires when npm's own range changes under it", () => {
+  const deviations = {
+    "lockfile-lint>js-yaml": {
+      target: "cosmiconfig>js-yaml",
+      value: "^4.3.2",
+      npmValue: "^4.3.1",
+      reason: "fixture",
+    },
+  };
+  const clean = findDeviationProblems({ "lockfile-lint>js-yaml": "^4.3.1" }, deviations);
+  assert.deepEqual(clean, [], "matching npmValue must be silent");
+
+  const bumped = findDeviationProblems({ "lockfile-lint>js-yaml": "^4.3.3" }, deviations);
+  assert.equal(bumped.length, 1);
+  assert.match(bumped[0], /written against npm's \^4\.3\.1 but package\.json now says \^4\.3\.3/);
+});
+
+test("a value deviation without npmValue is itself rejected", () => {
+  const problems = findDeviationProblems(
+    { "a>b": "^1.0.0" },
+    { "a>b": { target: "a>b", value: "^2.0.0", reason: "fixture" } }
+  );
+  assert.ok(problems.some((p: string) => /records no npmValue/.test(p)));
+});
+
+// npm's "." on a version-qualified parent repins that parent, so its own
+// `parent@range>child` selectors point at a version no longer installed.
+test("a version-qualified parent that repins itself and scopes children is rejected", () => {
+  const problems = findUnmappableKeys({ "foo@1": "2.0.0", "foo@1>bar": "3.0.0" });
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /version-qualified parent/);
+  assert.match(problems[0], /foo@1>bar/);
+});
+
+test("a version-qualified parent with no child pins is fine", () => {
+  assert.deepEqual(findUnmappableKeys({ "foo@1": "2.0.0" }), []);
+});
+
+test("a version-qualified parent scoping children but not repinned is fine", () => {
+  assert.deepEqual(findUnmappableKeys({ "minimatch@9>brace-expansion": "^2.1.4" }), []);
+});
+
+// A hostile value must not take the diagnostic down with it.
+test("formatting survives a value whose toString is null", () => {
+  const hostile = JSON.parse('{"toString":null}');
+  const problems = diffOverrides({ evil: hostile }, {});
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /missing from pnpm-workspace\.yaml: "evil"/);
+});
+
 // --- end to end: the real script, the real yaml.load, real exit codes ---
 
 // main() uses the script's real DEVIATIONS constant, and the stale-deviation check

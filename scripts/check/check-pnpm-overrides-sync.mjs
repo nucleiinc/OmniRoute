@@ -59,6 +59,11 @@ const ROOT =
 //   value  — an optional range that REPLACES npm's. Needed when npm's own pin is wrong
 //            for this tree: activating a dormant pin can break a package rather than
 //            remediate it, and pnpm has no way to say "pin, but not like that".
+//   npmValue — MANDATORY whenever `value` is set: the npm range this deviation was
+//            written against. Without it a value deviation swallows every later upstream
+//            bump to that pin, including a new security floor, and the gate still reports
+//            OK. That is the failure this whole gate exists to prevent, so an override of
+//            npm's value must expire the moment npm's value changes.
 //   reason — mandatory. A deviation is a decision, not a shortcut.
 // Two npm keys may share a target when pnpm cannot express them separately; their
 // effective values must then agree, and failure class 2 enforces that.
@@ -76,6 +81,7 @@ const DEVIATIONS = {
   "@apidevtools/json-schema-ref-parser>js-yaml": {
     target: "@apidevtools/json-schema-ref-parser>js-yaml",
     value: "^5.2.3",
+    npmValue: "^4.3.1",
     reason:
       "npm pins ^4.3.1 here, which is wrong for this tree and was harmless only while " +
       "pnpm ignored npm's overrides entirely. Activating the mirror made it bite: " +
@@ -89,6 +95,7 @@ const DEVIATIONS = {
   "lockfile-lint>js-yaml": {
     target: "cosmiconfig>js-yaml",
     value: "^4.3.2",
+    npmValue: "^4.3.1",
     reason:
       "npm's nested overrides are subtree-scoped; pnpm's parent>child matches only a DIRECT " +
       "edge. lockfile-lint@5.0.1 depends on cosmiconfig/debug/lockfile-lint-api/tinyglobby/" +
@@ -132,6 +139,20 @@ const DELIBERATE_SCOPE_NARROWING = {
       "exists to undo. promptfoo's own direct undici edge IS pinned by this entry.",
   },
 };
+
+/** Render any value for a diagnostic without ever throwing (e.g. {toString: null}). */
+function show(value) {
+  if (value === EMPTY_OVERRIDE) return "<empty object>";
+  try {
+    return String(value);
+  } catch {
+    try {
+      return JSON.stringify(value) ?? Object.prototype.toString.call(value);
+    } catch {
+      return Object.prototype.toString.call(value);
+    }
+  }
+}
 
 /** Marker for an npm override that nested down to nothing. */
 export const EMPTY_OVERRIDE = Symbol.for("omniroute.emptyOverride");
@@ -223,6 +244,23 @@ export function expectedPnpmOverrides(flatNpm, deviations = DEVIATIONS) {
  */
 export function findUnmappableKeys(expected) {
   const bad = [];
+  // npm's "." self-key on a version-qualified parent repins that parent, which leaves its
+  // own `parent@range>child` selectors pointing at a version that no longer exists in the
+  // tree, so the child pins bind nothing. Conservative and fail-closed: any version-
+  // qualified key that is itself pinned AND scopes children needs an explicit deviation.
+  for (const key of Object.keys(expected)) {
+    if (key.includes(">") || !key.includes("@", 1)) continue;
+    const children = Object.keys(expected).filter((k) => k.startsWith(`${key}>`));
+    if (children.length > 0) {
+      bad.push(
+        `"${key}" is a version-qualified parent that is itself pinned to ` +
+          `${String(expected[key])} while also scoping ${children.length} child pin(s) ` +
+          `(${children.join(", ")}). Repinning the parent leaves those child selectors ` +
+          `matching a version that is no longer installed, so they bind nothing. Add a ` +
+          `DEVIATIONS entry naming the resulting parent version`
+      );
+    }
+  }
   for (const key of Object.keys(expected)) {
     const segments = key.split(">");
     if (segments.length > 2) {
@@ -309,6 +347,21 @@ export function findDeviationProblems(flatNpm, deviations = DEVIATIONS) {
     if (entry?.value !== undefined && typeof entry.value !== "string") {
       problems.push(`DEVIATIONS entry "${npmKey}" has a non-string value override`);
     }
+    if (entry?.value !== undefined && entry?.npmValue === undefined) {
+      problems.push(
+        `DEVIATIONS entry "${npmKey}" overrides npm's value but records no npmValue; ` +
+          `without it a later upstream bump would be swallowed silently`
+      );
+    }
+    if (entry?.npmValue !== undefined && npmKey in flatNpm && flatNpm[npmKey] !== entry.npmValue) {
+      problems.push(
+        `DEVIATIONS entry "${npmKey}" was written against npm's ${entry.npmValue} but ` +
+          `package.json now says ${String(flatNpm[npmKey])}. The override to ` +
+          `${String(entry.value)} may no longer be correct — and if the bump is a new ` +
+          `security floor, keeping the old override would hide it. Reconsider, then update ` +
+          `npmValue`
+      );
+    }
     if (!entry?.reason) problems.push(`DEVIATIONS entry "${npmKey}" has no reason`);
   }
   return problems.sort();
@@ -323,11 +376,11 @@ export function diffOverrides(expected, actual) {
   const problems = [];
   for (const [key, value] of Object.entries(expected)) {
     if (!Object.hasOwn(actual, key)) {
-      problems.push(`missing from pnpm-workspace.yaml: "${key}": "${String(value)}"`);
+      problems.push(`missing from pnpm-workspace.yaml: "${key}": "${show(value)}"`);
     } else if (actual[key] !== value) {
       problems.push(
-        `version drift on "${key}": expected ${String(value)} (package.json, or a ` +
-          `DEVIATIONS value override), pnpm has ${String(actual[key])}`
+        `version drift on "${key}": expected ${show(value)} (package.json, or a ` +
+          `DEVIATIONS value override), pnpm has ${show(actual[key])}`
       );
     }
   }
