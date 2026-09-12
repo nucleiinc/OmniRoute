@@ -30,3 +30,52 @@ onlyBuiltDependencies:
   - "protobufjs"
   - "sharp"
   - "unrs-resolver"
+
+# Fork-local mirror of the npm `overrides` block in package.json.
+# pnpm does not read npm's top-level `overrides` field, so upstream's transitive
+# security pins (most of them Dependabot remediations) silently no-op on a pnpm
+# install. npm's nested form is not valid here either: pnpm takes a flat map and
+# scopes an override to a parent with `parent>child` selectors.
+# Keep this in sync with package.json `overrides` when merging upstream.
+# Deviation: npm scopes brace-expansion twice over (libxmljs2>minimatch and
+# rimraf>minimatch). pnpm parses only one `parent>child` level, so both collapse
+# into `minimatch@9>brace-expansion`. Scoping to major 9 is deliberate: only
+# minimatch 9 declares brace-expansion ^2.0.2, the range the advisory covers.
+# minimatch 3 wants ^1.1.7 and minimatch 10 wants ^5.0.8, and an unscoped
+# `minimatch>brace-expansion` pin breaks minimatch 10 at runtime, because
+# brace-expansion 2.x has no named `expand` export (TypeError in braceExpand).
+overrides:
+  "@apidevtools/json-schema-ref-parser>js-yaml": "^4.3.1"
+  "@babel/core": "^7.29.6"
+  "@eslint/eslintrc>js-yaml": "^4.3.1"
+  "@hono/node-server": "^2.0.5"
+  "@openai/codex-security>smol-toml": "^1.8.0"
+  "@yarnpkg/parsers>js-yaml": "^4.3.2"
+  "adm-zip": "^0.6.0"
+  "body-parser": "^2.3.0"
+  "browserslist": "^4.28.8"
+  "concurrently>shell-quote": "^1.9.0"
+  "eslint-plugin-react-hooks": "7.1.1"
+  "fast-uri": "^3.1.7"
+  "fast-xml-parser": "^5.10.1"
+  "form-data": "^4.0.6"
+  "hono": "^4.12.34"
+  "ip-address": "^10.3.1"
+  "jsdom>undici": "^7.29.0"
+  "lockfile-lint>js-yaml": "^4.3.1"
+  "minimatch@9>brace-expansion": "^2.1.4"
+  "monaco-editor>dompurify": "^3.4.14"
+  "nanoid": "^3.3.17"
+  "node-gyp>undici": "^6.28.0"
+  "onnxruntime-node": "1.24.3"
+  "postcss": "^8.5.18"
+  "promptfoo>js-yaml": "^5.2.2"
+  "promptfoo>undici": "^7.29.0"
+  "protobufjs": "^7.6.5"
+  "qs": "^6.16.0"
+  "sharp": "^0.35.4"
+  "socket.io-parser": "^4.2.7"
+  "tar": "^7.5.21"
+  "uuid": "^14.0.2"
+  "vite": "^8.0.16"
+  "xmlbuilder2>js-yaml": "^4.3.1"
