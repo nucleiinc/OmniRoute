@@ -10,10 +10,17 @@
 # pnpm-workspace.yaml so the pins actually apply. A merge is precisely how a new upstream
 # pin arrives unmirrored, and without this hook nothing would notice: the gate is not in
 # CI (ci.yml is upstream's file) and pre-push is a deliberate no-op upstream.
+#
+# This hook FAILS CLOSED. An earlier version skipped the check when node was missing and
+# exited 0, which is the worst possible behavior here: the merge commit that most needs
+# the gate is the one that lands without it, and the skip is invisible afterwards. A
+# missing toolchain is a reason to stop and let a human decide, not to wave the merge
+# through. Override deliberately with `git merge --no-verify` if you truly must.
 if ! command -v node >/dev/null 2>&1; then
-  echo "⚠️  node not found in PATH — skipping pre-merge-commit gates"
-  echo "   Run 'npm run check:pnpm-overrides' manually after this merge."
-  exit 0
+  echo "✗ pre-merge-commit: node not found in PATH, so the pnpm-overrides mirror could not"
+  echo "  be checked. Refusing the merge commit rather than landing it unverified."
+  echo "  Fix PATH and retry, or re-run with 'git merge --no-verify' if you accept the risk."
+  exit 1
 fi
 
 node scripts/check/check-pnpm-overrides-sync.mjs

@@ -115,7 +115,8 @@ test("a disagreeing collapse fails the gate regardless of npm key order", () => 
       rimraf: { minimatch: { "brace-expansion": "^2.1.4" } },
     },
     { "minimatch@9>brace-expansion": "^2.1.4" },
-    COLLAPSING
+    COLLAPSING,
+    {}
   );
   const bumpSecond = collectProblems(
     {
@@ -123,7 +124,8 @@ test("a disagreeing collapse fails the gate regardless of npm key order", () => 
       libxmljs2: { minimatch: { "brace-expansion": "^2.9.9" } },
     },
     { "minimatch@9>brace-expansion": "^2.1.4" },
-    COLLAPSING
+    COLLAPSING,
+    {}
   );
   assert.ok(bumpFirst.length > 0, "bump listed first must fail");
   assert.ok(bumpSecond.length > 0, "bump listed second must fail too");
@@ -146,7 +148,9 @@ test("findUnmappableKeys accepts a version-ranged parent, which is still one lev
 test("a doubly-nested pin with no deviation fails even when mirrored verbatim", () => {
   const problems = collectProblems(
     { foo: { bar: { baz: "^1.0.0" } } },
-    { "foo>bar>baz": "^1.0.0" }
+    { "foo>bar>baz": "^1.0.0" },
+    {},
+    {}
   );
   assert.ok(problems.some((p: string) => /">" levels/.test(p)));
 });
@@ -273,6 +277,45 @@ test("diffOverrides returns several problems in a stable sorted order", () => {
   assert.deepEqual(problems, [...problems].sort());
 });
 
+// --- regressions from the Codex review gate ---
+
+// pnpm refuses a non-string override value outright ("should be a string, but got
+// number"), so comparing them for equality would pass a mirror that cannot install.
+test("findUnsupportedValues rejects non-string override values", () => {
+  for (const bad of [1, true, null]) {
+    const problems = findUnsupportedValues({ foo: bad });
+    assert.ok(
+      problems.some((p: string) => /non-string value/.test(p)),
+      `value ${String(bad)} must be rejected`
+    );
+  }
+});
+
+test("a non-string value mirrored identically on both sides still fails", () => {
+  const problems = collectProblems({ foo: 1 }, { foo: 1 }, {}, {});
+  assert.ok(problems.some((p: string) => /non-string value/.test(p)));
+});
+
+// The conflict diagnostic interpolates values; an empty-object marker is a Symbol and
+// threw "Cannot convert a Symbol value to a string", losing the message it promised.
+test("a collapse conflict involving an empty object reports instead of throwing", () => {
+  const deviations = {
+    "a>b>c": { target: "shared>c", reason: "fixture" },
+    "d>b>c": { target: "shared>c", reason: "fixture" },
+  };
+  const problems = collectProblems(
+    { a: { b: { c: {} } }, d: { b: { c: "^2.0.0" } } },
+    { "shared>c": "^2.0.0" },
+    deviations,
+    {}
+  );
+  assert.ok(problems.length > 0, "must report");
+  assert.ok(
+    problems.some((p: string) => /<empty object>/.test(p)),
+    "the empty-object side must be rendered, not thrown on"
+  );
+});
+
 // --- end to end: the real script, the real yaml.load, real exit codes ---
 
 // main() uses the script's real DEVIATIONS constant, and the stale-deviation check
@@ -282,8 +325,15 @@ test("diffOverrides returns several problems in a stable sorted order", () => {
 const LIVE_DEVIATION_NPM = {
   libxmljs2: { minimatch: { "brace-expansion": "^2.1.4" } },
   rimraf: { minimatch: { "brace-expansion": "^2.1.4" } },
+  "@apidevtools/json-schema-ref-parser": { "js-yaml": "^4.3.1" },
+  "lockfile-lint": { "js-yaml": "^4.3.1" },
+  promptfoo: { undici: "^7.29.0" },
 };
-const LIVE_DEVIATION_YAML = '  "minimatch@9>brace-expansion": "^2.1.4"\n';
+const LIVE_DEVIATION_YAML =
+  '  "minimatch@9>brace-expansion": "^2.1.4"\n' +
+  '  "@apidevtools/json-schema-ref-parser>js-yaml": "^5.2.3"\n' +
+  '  "cosmiconfig>js-yaml": "^4.3.2"\n' +
+  '  "promptfoo>undici": "^7.29.0"\n';
 
 function runGate(npmOverrides: Record<string, unknown>, workspaceYaml: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "overrides-gate-"));

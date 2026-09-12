@@ -54,10 +54,14 @@ const ROOT =
   process.env.PNPM_OVERRIDES_GATE_ROOT ||
   path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-// Flattened npm key -> { target: the pnpm key it is expressed as, reason: why }.
-// Every entry needs a reason: a deviation is a decision, not a shortcut. Two npm keys
-// may share a target when pnpm cannot express them separately, but their values must
-// then agree, and class 2 above enforces that.
+// Flattened npm key -> { target, value?, reason }.
+//   target — the pnpm key this npm entry is expressed as.
+//   value  — an optional range that REPLACES npm's. Needed when npm's own pin is wrong
+//            for this tree: activating a dormant pin can break a package rather than
+//            remediate it, and pnpm has no way to say "pin, but not like that".
+//   reason — mandatory. A deviation is a decision, not a shortcut.
+// Two npm keys may share a target when pnpm cannot express them separately; their
+// effective values must then agree, and failure class 2 enforces that.
 const DEVIATIONS = {
   "libxmljs2>minimatch>brace-expansion": {
     target: "minimatch@9>brace-expansion",
@@ -68,6 +72,32 @@ const DEVIATIONS = {
       "`minimatch>brace-expansion`: that drags minimatch 10 from brace-expansion 5.x down " +
       "to 2.x, which exports no named `expand`, and every eslint config-array path match " +
       "throws TypeError at runtime.",
+  },
+  "@apidevtools/json-schema-ref-parser>js-yaml": {
+    target: "@apidevtools/json-schema-ref-parser>js-yaml",
+    value: "^5.2.3",
+    reason:
+      "npm pins ^4.3.1 here, which is wrong for this tree and was harmless only while " +
+      "pnpm ignored npm's overrides entirely. Activating the mirror made it bite: " +
+      "@apidevtools/json-schema-ref-parser@16.0.1 declares js-yaml ^5.2.3 and imports nine " +
+      "named bindings from it, six of which (binaryTag, mergeTag, omapTag, pairsTag, setTag, " +
+      "timestampTag) do not exist in 4.x, so the forced 4.3.2 throws SyntaxError at load. " +
+      "^5.2.3 satisfies the declared range and still clears the js-yaml 5.x advisory " +
+      "(GHSA-pm4m-ph32-ghv5, patched 5.2.2), so the pin's remediation intent is preserved. " +
+      "Dev-only reach (promptfoo). Report upstream: npm applies the same downgrade.",
+  },
+  "lockfile-lint>js-yaml": {
+    target: "cosmiconfig>js-yaml",
+    value: "^4.3.2",
+    reason:
+      "npm's nested overrides are subtree-scoped; pnpm's parent>child matches only a DIRECT " +
+      "edge. lockfile-lint@5.0.1 depends on cosmiconfig/debug/lockfile-lint-api/tinyglobby/" +
+      "yargs and has no direct js-yaml, so mirroring npm's key verbatim binds nothing and " +
+      "the guard is silently lost. js-yaml sits one hop further down under cosmiconfig@9.0.2 " +
+      "(declares ^4.1.0, resolves 4.3.2), so retargeting there restores the protection. " +
+      "^4.3.2 is the patch point for the highest 4.x advisory (GHSA-2883-xcg3-v3hh). This is " +
+      "broader than npm's scope: it also covers cosmiconfig under other parents, which is " +
+      "strictly more protective and pins nothing to a vulnerable version.",
   },
   "rimraf>minimatch>brace-expansion": {
     target: "minimatch@9>brace-expansion",
@@ -80,6 +110,26 @@ const DEVIATIONS = {
       "Neither parent declares minimatch directly (libxmljs2 -> bindings/nan/node-gyp/" +
       "prebuild-install, rimraf -> glob), so this selector is at least as effective as " +
       "npm's original pair.",
+  },
+};
+
+// npm's nested overrides are SUBTREE-scoped: they bind the child at any depth under the
+// parent. pnpm's `parent>child` binds only a DIRECT edge. Mirroring a nested npm key
+// verbatim therefore narrows its scope, and the gate cannot see that: it compares keys and
+// ranges, not resolved trees.
+//
+// Narrowing is not always a loss. Where npm's broader scope would force a major downgrade
+// onto a descendant that declares a newer range, the narrower pnpm scope is what keeps the
+// tree working. Each such case is recorded here so nobody "fixes" the coverage gap into a
+// break. Keys are validated against package.json so an entry cannot go stale.
+const DELIBERATE_SCOPE_NARROWING = {
+  "promptfoo>undici": {
+    reason:
+      "npm's subtree scope would force undici ^7.29.0 onto @apidevtools/json-schema-ref-" +
+      "parser@16.0.1, which declares ^8.10.0 and resolves 8.10.2. pnpm's direct-edge match " +
+      "leaves that descendant alone, which is why it still works. Do NOT widen this to cover " +
+      "the subtree: it is the same major-downgrade trap that the js-yaml deviation above " +
+      "exists to undo. promptfoo's own direct undici edge IS pinned by this entry.",
   },
 };
 
@@ -134,15 +184,23 @@ export function flattenNpmOverrides(overrides, prefix = "") {
 export function expectedPnpmOverrides(flatNpm, deviations = DEVIATIONS) {
   const expected = Object.create(null);
   const sources = Object.create(null);
-  for (const [npmKey, value] of Object.entries(flatNpm)) {
-    const target = deviations[npmKey]?.target ?? npmKey;
+  for (const [npmKey, npmValue] of Object.entries(flatNpm)) {
+    const deviation = deviations[npmKey];
+    const target = deviation?.target ?? npmKey;
+    // A declared value deviation replaces npm's range deliberately; conflicts are then
+    // judged on what pnpm will actually apply, not on what npm asked for.
+    const value = deviation?.value ?? npmValue;
     (sources[target] ??= []).push({ npmKey, value });
     expected[target] = value;
   }
   const conflicts = [];
   for (const [target, entries] of Object.entries(sources)) {
     if (new Set(entries.map((e) => e.value)).size > 1) {
-      const detail = entries.map((e) => `${e.npmKey}=${e.value}`).join(", ");
+      const detail = entries
+        .map(
+          (e) => `${e.npmKey}=${e.value === EMPTY_OVERRIDE ? "<empty object>" : String(e.value)}`
+        )
+        .join(", ");
       conflicts.push(
         `"${target}" is the deviation target of ${entries.length} npm keys with DIFFERENT ` +
           `values (${detail}); pnpm holds only one, so at least one pin would be a no-op`
@@ -198,12 +256,40 @@ export function findUnsupportedValues(expected) {
   for (const [key, value] of Object.entries(expected)) {
     if (value === EMPTY_OVERRIDE) {
       problems.push(`"${key}" nests to an empty object in package.json, so it pins nothing`);
-    } else if (typeof value === "string" && value.startsWith("$")) {
+    } else if (typeof value !== "string") {
+      // pnpm refuses these outright: "The value of overrides.<key> should be a string,
+      // but got number". Comparing them for equality would pass a mirror that cannot install.
+      problems.push(
+        `"${key}" has a non-string value (${value === null ? "null" : typeof value}); pnpm ` +
+          `requires every override value to be a string and fails the install otherwise`
+      );
+    } else if (value.startsWith("$")) {
       problems.push(
         `"${key}" uses npm's "${value}" direct-dependency reference; pnpm's support for ` +
           `$-prefixed override values is unconfirmed, so mirroring it verbatim risks a ` +
           `silent no-op. Resolve it to a literal range, or add a DEVIATIONS entry`
       );
+    }
+  }
+  return problems.sort();
+}
+
+/**
+ * DEVIATIONS entries upstream no longer declares, or that omit a target or reason.
+ * Also validates DELIBERATE_SCOPE_NARROWING the same way, so a recorded decision cannot
+ * outlive the npm entry it describes.
+ */
+export function findScopeNarrowingProblems(flatNpm, narrowing = DELIBERATE_SCOPE_NARROWING) {
+  const problems = [];
+  for (const [npmKey, entry] of Object.entries(narrowing ?? {})) {
+    if (!(npmKey in flatNpm)) {
+      problems.push(
+        `stale DELIBERATE_SCOPE_NARROWING entry "${npmKey}": package.json no longer ` +
+          `declares it, so the decision it records no longer applies — remove it`
+      );
+    }
+    if (!entry?.reason) {
+      problems.push(`DELIBERATE_SCOPE_NARROWING entry "${npmKey}" has no reason`);
     }
   }
   return problems.sort();
@@ -220,12 +306,19 @@ export function findDeviationProblems(flatNpm, deviations = DEVIATIONS) {
       );
     }
     if (!entry?.target) problems.push(`DEVIATIONS entry "${npmKey}" has no target`);
+    if (entry?.value !== undefined && typeof entry.value !== "string") {
+      problems.push(`DEVIATIONS entry "${npmKey}" has a non-string value override`);
+    }
     if (!entry?.reason) problems.push(`DEVIATIONS entry "${npmKey}" has no reason`);
   }
   return problems.sort();
 }
 
-/** Compare expected against actual, returning human-readable drift lines. */
+/**
+ * Compare expected against actual, returning human-readable drift lines.
+ * `expected` may carry a DEVIATIONS value override, so the wording says "expected"
+ * rather than attributing the range to package.json, which may not hold it.
+ */
 export function diffOverrides(expected, actual) {
   const problems = [];
   for (const [key, value] of Object.entries(expected)) {
@@ -233,7 +326,8 @@ export function diffOverrides(expected, actual) {
       problems.push(`missing from pnpm-workspace.yaml: "${key}": "${String(value)}"`);
     } else if (actual[key] !== value) {
       problems.push(
-        `version drift on "${key}": package.json wants ${String(value)}, pnpm has ${String(actual[key])}`
+        `version drift on "${key}": expected ${String(value)} (package.json, or a ` +
+          `DEVIATIONS value override), pnpm has ${String(actual[key])}`
       );
     }
   }
@@ -246,7 +340,12 @@ export function diffOverrides(expected, actual) {
 }
 
 /** All four failure classes for one pair of manifests, in one list. */
-export function collectProblems(npmOverrides, pnpmOverrides, deviations = DEVIATIONS) {
+export function collectProblems(
+  npmOverrides,
+  pnpmOverrides,
+  deviations = DEVIATIONS,
+  narrowing = DELIBERATE_SCOPE_NARROWING
+) {
   const flatNpm = flattenNpmOverrides(npmOverrides);
   const { expected, conflicts } = expectedPnpmOverrides(flatNpm, deviations);
   // An empty-nest marker is reported by findUnsupportedValues; it is not a mirror
@@ -260,6 +359,7 @@ export function collectProblems(npmOverrides, pnpmOverrides, deviations = DEVIAT
     ...findUnmappableKeys(expected),
     ...findUnsupportedValues(expected),
     ...findDeviationProblems(flatNpm, deviations),
+    ...findScopeNarrowingProblems(flatNpm, narrowing),
     ...diffOverrides(diffable, pnpmOverrides),
   ];
 }
