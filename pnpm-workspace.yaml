@@ -40,7 +40,9 @@ onlyBuiltDependencies:
 # Deviation: npm scopes brace-expansion twice over (libxmljs2>minimatch and
 # rimraf>minimatch). pnpm parses only one `parent>child` level, so both collapse
 # into `minimatch@9>brace-expansion`. Scoping to major 9 is deliberate: only
-# minimatch 9 declares brace-expansion ^2.0.2, the range the advisory covers.
+# minimatch 9 declares brace-expansion ^2.0.2, a range that ADMITS versions below the
+# 2.1.4 upstream pins as the fix. That is why major 9 is the one that needs pinning:
+# ^2.0.2 is the vulnerable-admitting range, not the remediated one.
 # minimatch 3 wants ^1.1.7 and minimatch 10 wants ^5.0.8, and an unscoped
 # `minimatch>brace-expansion` pin breaks minimatch 10 at runtime, because
 # brace-expansion 2.x has no named `expand` export (TypeError in braceExpand).

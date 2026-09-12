@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# Fork-local hook (nucleiinc). No upstream counterpart, so it never merge-conflicts.
+#
+# Git does NOT run pre-commit for a merge commit; it runs pre-merge-commit. Every gate
+# wired only into pre-commit is therefore skipped by exactly the operation this fork
+# performs most often: `git merge upstream/release/vX.Y.Z`.
+#
+# That matters for the overrides mirror. Upstream pins transitive dependencies through
+# npm's `overrides` field, pnpm ignores that field, and this fork mirrors the block into
+# pnpm-workspace.yaml so the pins actually apply. A merge is precisely how a new upstream
+# pin arrives unmirrored, and without this hook nothing would notice: the gate is not in
+# CI (ci.yml is upstream's file) and pre-push is a deliberate no-op upstream.
+if ! command -v node >/dev/null 2>&1; then
+  echo "⚠️  node not found in PATH — skipping pre-merge-commit gates"
+  echo "   Run 'npm run check:pnpm-overrides' manually after this merge."
+  exit 0
+fi
+
+node scripts/check/check-pnpm-overrides-sync.mjs

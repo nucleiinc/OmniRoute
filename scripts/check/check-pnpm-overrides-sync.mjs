@@ -19,8 +19,27 @@
 //   - npm nests objects to scope an override to a parent; pnpm uses a `>` selector:
 //       npm:  "jsdom": { "undici": "^7.29.0" }
 //       pnpm: "jsdom>undici": "^7.29.0"
-//   - pnpm parses exactly ONE `parent>child` level. npm's doubly-nested entries have
-//     no direct equivalent and must be declared in DEVIATIONS below.
+//   - pnpm parses exactly ONE `parent>child` level. A parent may carry a version range
+//     ("minimatch@9>brace-expansion") but that is still one level. npm's doubly-nested
+//     entries therefore have NO pnpm equivalent and must be declared in DEVIATIONS.
+//     Observed: pnpm 11.25.0 rejects a deeper selector outright —
+//     `[ERR_PNPM_INVALID_SELECTOR] Cannot parse the "minimatch>brace-expansion" selector`
+//     (pnpm.mjs:187063-187066 throws when the child half has no parseable alias).
+//
+// Four independent failure classes, because a mirror can be wrong while still looking
+// mirrored. Each of these was a real false negative in the first version of this gate:
+//   1. drift      — a pin missing from the YAML, a version mismatch, or a YAML-only entry.
+//   2. conflict   — several npm keys collapse onto one pnpm key with DIFFERENT values.
+//                   Keeping whichever wrote last hides an upstream bump to the others,
+//                   and which one wins depends on key order in a file upstream controls.
+//   3. unmappable — a key pnpm's selector parser cannot accept: more than one `>` level,
+//                   or a segment that is not a package name. pnpm REFUSES these with
+//                   ERR_PNPM_INVALID_SELECTOR and the whole install fails, so catching
+//                   them here trades a terse install-time error for a precise one that
+//                   names the offending key and what to do about it.
+//   4. stale      — a DEVIATIONS entry whose npm key upstream has dropped (its recorded
+//                   rationale is now silently false), or one missing a target or reason.
+//                   Mirrors the `assertNoStale` convention in scripts/check/lib/allowlist.mjs.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -28,28 +47,78 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import * as yaml from "js-yaml";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+// Repo root. PNPM_OVERRIDES_GATE_ROOT exists so the test suite can point main() at a
+// fixture pair of manifests; the script itself still resolves its imports from here,
+// which a copied-to-tmp script could not do. Never set it outside tests.
+const ROOT =
+  process.env.PNPM_OVERRIDES_GATE_ROOT ||
+  path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
-// npm key (flattened) -> pnpm key it is deliberately expressed as.
-// Every entry needs a reason: a deviation is a decision, not a shortcut.
+// Flattened npm key -> { target: the pnpm key it is expressed as, reason: why }.
+// Every entry needs a reason: a deviation is a decision, not a shortcut. Two npm keys
+// may share a target when pnpm cannot express them separately, but their values must
+// then agree, and class 2 above enforces that.
 const DEVIATIONS = {
-  // pnpm cannot express `libxmljs2>minimatch>brace-expansion` (two levels deep), so
-  // both of npm's brace-expansion pins collapse into one selector scoped by minimatch
-  // major. Major 9 is the only one declaring brace-expansion ^2.0.2, the range the
-  // advisory covers. Do NOT widen this to a bare `minimatch>brace-expansion`: that
-  // drags minimatch 10 from brace-expansion 5.x down to 2.x, which exports no named
-  // `expand`, and every eslint config-array path match throws TypeError at runtime.
-  "libxmljs2>minimatch>brace-expansion": "minimatch@9>brace-expansion",
-  "rimraf>minimatch>brace-expansion": "minimatch@9>brace-expansion",
+  "libxmljs2>minimatch>brace-expansion": {
+    target: "minimatch@9>brace-expansion",
+    reason:
+      "pnpm cannot express a two-level selector, so both of npm's brace-expansion pins " +
+      "collapse onto one key scoped by minimatch major. Major 9 is the only one declaring " +
+      "brace-expansion ^2.0.2, a range that ADMITS versions below the 2.1.4 upstream pins as the fix, which is why major 9 is the one needing a pin. Do NOT widen this to a bare " +
+      "`minimatch>brace-expansion`: that drags minimatch 10 from brace-expansion 5.x down " +
+      "to 2.x, which exports no named `expand`, and every eslint config-array path match " +
+      "throws TypeError at runtime.",
+  },
+  "rimraf>minimatch>brace-expansion": {
+    target: "minimatch@9>brace-expansion",
+    reason:
+      "Same collapse as the libxmljs2 entry above: one pnpm key covers both npm parents, " +
+      "scoped to minimatch major 9 for the reason recorded there. Coverage was checked " +
+      "rather than assumed: every minimatch reachable under either parent is 9.0.9, and " +
+      "brace-expansion 2.x has exactly one consumer in the whole tree (minimatch@9.0.9), " +
+      "so the broadened selector reaches the same single edge and pins nothing extra. " +
+      "Neither parent declares minimatch directly (libxmljs2 -> bindings/nan/node-gyp/" +
+      "prebuild-install, rimraf -> glob), so this selector is at least as effective as " +
+      "npm's original pair.",
+  },
 };
 
-/** Flatten npm's nested `overrides` into pnpm's flat `parent>child` key form. */
+/** Marker for an npm override that nested down to nothing. */
+export const EMPTY_OVERRIDE = Symbol.for("omniroute.emptyOverride");
+
+// One segment of a pnpm selector: a package name, optionally scoped, optionally
+// carrying an "@range" suffix ("minimatch@9"). npm forbids uppercase and a leading
+// "_" or ".", so this also rejects "__proto__" and npm's "." self-key, neither of
+// which is a package name and neither of which pnpm can honor as a selector segment.
+const SELECTOR_SEGMENT = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*(?:@.+)?$/;
+
+/**
+ * Flatten npm's nested `overrides` into pnpm's flat `parent>child` key form.
+ *
+ * Accumulates on a null-prototype object: a key named `__proto__` would otherwise hit
+ * the prototype setter and vanish from the result entirely.
+ *
+ * npm's "." key means "the parent package itself" and is documented as such, so it
+ * collapses to the bare parent key. Composing `parent>.` instead would produce a
+ * selector pnpm cannot honor, and it carries only one ">" so depth checking misses it.
+ */
 export function flattenNpmOverrides(overrides, prefix = "") {
-  const out = {};
+  const out = Object.create(null);
   for (const [key, value] of Object.entries(overrides ?? {})) {
+    if (key === ".") {
+      // A bare "." at the top level has no parent package and means nothing.
+      out[prefix || "."] = value;
+      continue;
+    }
     const composed = prefix ? `${prefix}>${key}` : key;
     if (value && typeof value === "object") {
-      Object.assign(out, flattenNpmOverrides(value, composed));
+      const nested = flattenNpmOverrides(value, composed);
+      if (Object.keys(nested).length === 0) {
+        // `"foo": {}` carries no pin. Surface it rather than consuming it in silence,
+        // which is the same failure shape this gate exists to prevent.
+        out[composed] = EMPTY_OVERRIDE;
+      }
+      Object.assign(out, nested);
     } else {
       out[composed] = value;
     }
@@ -57,33 +126,142 @@ export function flattenNpmOverrides(overrides, prefix = "") {
   return out;
 }
 
-/** Apply DEVIATIONS, returning the pnpm keys the workspace file is expected to hold. */
+/**
+ * Apply DEVIATIONS to flattened npm keys.
+ * Returns the expected pnpm map AND every collapse conflict, so a many-to-one rewrite
+ * can never quietly discard a divergent value.
+ */
 export function expectedPnpmOverrides(flatNpm, deviations = DEVIATIONS) {
-  const out = {};
-  for (const [key, value] of Object.entries(flatNpm)) {
-    out[deviations[key] ?? key] = value;
+  const expected = Object.create(null);
+  const sources = Object.create(null);
+  for (const [npmKey, value] of Object.entries(flatNpm)) {
+    const target = deviations[npmKey]?.target ?? npmKey;
+    (sources[target] ??= []).push({ npmKey, value });
+    expected[target] = value;
   }
-  return out;
+  const conflicts = [];
+  for (const [target, entries] of Object.entries(sources)) {
+    if (new Set(entries.map((e) => e.value)).size > 1) {
+      const detail = entries.map((e) => `${e.npmKey}=${e.value}`).join(", ");
+      conflicts.push(
+        `"${target}" is the deviation target of ${entries.length} npm keys with DIFFERENT ` +
+          `values (${detail}); pnpm holds only one, so at least one pin would be a no-op`
+      );
+    }
+  }
+  return { expected, conflicts: conflicts.sort() };
 }
 
-/** Compare expected against actual, returning a list of human-readable drift lines. */
+/**
+ * Keys pnpm's selector parser will refuse. Two distinct ways that happens, and depth
+ * alone catches only the first:
+ *   - more than one `>` level survived the deviation map (npm allows arbitrary nesting,
+ *     pnpm parses exactly one);
+ *   - a segment that is not a package name, e.g. npm's "." self-key, which yields a
+ *     one-level `parent>.` that depth checking would wave through.
+ * Both make `pnpm install` exit non-zero with ERR_PNPM_INVALID_SELECTOR. Reporting them
+ * here is not redundant: it names the key and the remedy instead of leaving a maintainer
+ * to work backwards from pnpm's one-line parse error.
+ */
+export function findUnmappableKeys(expected) {
+  const bad = [];
+  for (const key of Object.keys(expected)) {
+    const segments = key.split(">");
+    if (segments.length > 2) {
+      bad.push(
+        `"${key}" has ${segments.length - 1} ">" levels; pnpm parses one and rejects the ` +
+          `rest with ERR_PNPM_INVALID_SELECTOR, failing the install. Add a DEVIATIONS ` +
+          `entry choosing a one-level target and recording why`
+      );
+      continue;
+    }
+    const offender = segments.find((segment) => !SELECTOR_SEGMENT.test(segment));
+    if (offender !== undefined) {
+      bad.push(
+        `"${key}" is not a usable pnpm selector: segment "${offender}" is not a package ` +
+          `name, so pnpm rejects it with ERR_PNPM_INVALID_SELECTOR and the install fails` +
+          (offender === "." ? ' (npm\'s "." self-key becomes the bare parent key)' : "")
+      );
+    }
+  }
+  return bad.sort();
+}
+
+/**
+ * Override VALUES pnpm may not interpret as npm does. npm resolves a `$name` value to
+ * the spec of that direct dependency; whether pnpm honors it is unconfirmed, so this
+ * fails closed. A false positive costs a maintainer minutes; a false negative restores
+ * the vulnerability the pin was added to close.
+ */
+export function findUnsupportedValues(expected) {
+  const problems = [];
+  for (const [key, value] of Object.entries(expected)) {
+    if (value === EMPTY_OVERRIDE) {
+      problems.push(`"${key}" nests to an empty object in package.json, so it pins nothing`);
+    } else if (typeof value === "string" && value.startsWith("$")) {
+      problems.push(
+        `"${key}" uses npm's "${value}" direct-dependency reference; pnpm's support for ` +
+          `$-prefixed override values is unconfirmed, so mirroring it verbatim risks a ` +
+          `silent no-op. Resolve it to a literal range, or add a DEVIATIONS entry`
+      );
+    }
+  }
+  return problems.sort();
+}
+
+/** DEVIATIONS entries upstream no longer declares, or that omit a target or reason. */
+export function findDeviationProblems(flatNpm, deviations = DEVIATIONS) {
+  const problems = [];
+  for (const [npmKey, entry] of Object.entries(deviations)) {
+    if (!(npmKey in flatNpm)) {
+      problems.push(
+        `stale DEVIATIONS entry "${npmKey}": package.json no longer declares it, so the ` +
+          `rationale recorded for target "${entry?.target}" may no longer hold — remove it`
+      );
+    }
+    if (!entry?.target) problems.push(`DEVIATIONS entry "${npmKey}" has no target`);
+    if (!entry?.reason) problems.push(`DEVIATIONS entry "${npmKey}" has no reason`);
+  }
+  return problems.sort();
+}
+
+/** Compare expected against actual, returning human-readable drift lines. */
 export function diffOverrides(expected, actual) {
   const problems = [];
   for (const [key, value] of Object.entries(expected)) {
-    if (!(key in actual)) {
-      problems.push(`missing from pnpm-workspace.yaml: "${key}": "${value}"`);
+    if (!Object.hasOwn(actual, key)) {
+      problems.push(`missing from pnpm-workspace.yaml: "${key}": "${String(value)}"`);
     } else if (actual[key] !== value) {
       problems.push(
-        `version drift on "${key}": package.json wants ${value}, pnpm has ${actual[key]}`
+        `version drift on "${key}": package.json wants ${String(value)}, pnpm has ${String(actual[key])}`
       );
     }
   }
   for (const key of Object.keys(actual)) {
-    if (!(key in expected)) {
+    if (!Object.hasOwn(expected, key)) {
       problems.push(`extra in pnpm-workspace.yaml, not in package.json: "${key}"`);
     }
   }
   return problems.sort();
+}
+
+/** All four failure classes for one pair of manifests, in one list. */
+export function collectProblems(npmOverrides, pnpmOverrides, deviations = DEVIATIONS) {
+  const flatNpm = flattenNpmOverrides(npmOverrides);
+  const { expected, conflicts } = expectedPnpmOverrides(flatNpm, deviations);
+  // An empty-nest marker is reported by findUnsupportedValues; it is not a mirror
+  // drift, and it is not a range the YAML could ever match. Keep it out of the diff.
+  const diffable = Object.create(null);
+  for (const [key, value] of Object.entries(expected)) {
+    if (value !== EMPTY_OVERRIDE) diffable[key] = value;
+  }
+  return [
+    ...conflicts,
+    ...findUnmappableKeys(expected),
+    ...findUnsupportedValues(expected),
+    ...findDeviationProblems(flatNpm, deviations),
+    ...diffOverrides(diffable, pnpmOverrides),
+  ];
 }
 
 function main() {
@@ -98,13 +276,18 @@ function main() {
       "[pnpm-overrides-sync] FAIL — package.json declares overrides but pnpm-workspace.yaml has none."
     );
     console.error("  → pnpm ignores npm's `overrides` field; every pin is currently a no-op.");
+    const { expected } = expectedPnpmOverrides(flattenNpmOverrides(npmOverrides));
+    console.error(`  → restore these ${Object.keys(expected).length} key(s) under \`overrides:\`:`);
+    for (const [key, value] of Object.entries(expected)) {
+      console.error(`      "${key}": "${String(value)}"`);
+    }
     process.exit(1);
   }
 
-  const expected = expectedPnpmOverrides(flattenNpmOverrides(npmOverrides));
-  const problems = diffOverrides(expected, pnpmOverrides);
+  const problems = collectProblems(npmOverrides, pnpmOverrides);
 
   if (problems.length === 0) {
+    const { expected } = expectedPnpmOverrides(flattenNpmOverrides(npmOverrides));
     console.log(
       `[pnpm-overrides-sync] OK — ${Object.keys(expected).length} override(s) mirrored into pnpm-workspace.yaml`
     );
@@ -112,13 +295,16 @@ function main() {
   }
 
   console.error(
-    `[pnpm-overrides-sync] FAIL — ${problems.length} drift(s) between npm and pnpm overrides:`
+    `[pnpm-overrides-sync] FAIL — ${problems.length} problem(s) between npm and pnpm overrides:`
   );
   for (const problem of problems) console.error(`  ✗ ${problem}`);
   console.error(
     "\n  → Upstream changed package.json `overrides`. Mirror the change into" +
-      "\n    pnpm-workspace.yaml `overrides`, flattening npm's nested form to" +
-      "\n    pnpm's `parent>child` selectors, then re-run `pnpm install`." +
+      "\n    pnpm-workspace.yaml `overrides`, converting npm's nested form to pnpm's" +
+      "\n    `parent>child` selectors. pnpm parses ONE level only: never paste a key" +
+      "\n    carrying two or more `>`, because pnpm rejects it and the install fails." +
+      "\n    A deeper npm nest needs a DEVIATIONS entry in this script naming the" +
+      "\n    one-level target you chose and the reason. Re-run `pnpm install` after." +
       "\n  → A pin that exists only in package.json does nothing on a pnpm install."
   );
   process.exit(1);
