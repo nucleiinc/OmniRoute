@@ -269,6 +269,12 @@ function matchClaudePlanTier(raw: string, upper: string) {
 function matchKeywordPlanTier(raw: string, upper: string) {
   if (upper.includes("PRO+") || upper.includes("PRO PLUS") || upper.includes("PROPLUS"))
     return { key: "plus", label: "Pro+", variant: "success", rank: 4, raw };
+  // OpenAI Codex "Pro Lite": the live usage endpoint reports the fused
+  // "prolite" (workspacePlanType), which hides the whole-word PRO/LITE tokens.
+  // Boundary guards keep PROLITERATE-style words out (same discipline as
+  // hasTierToken below).
+  if (/(?:^|[^A-Z])PRO[\s_-]?LITE(?:[^A-Z]|$)/.test(upper))
+    return { key: "lite", label: "Pro Lite", variant: "primary", rank: 2, raw };
   if (upper.includes("ENTERPRISE") || upper.includes("CORP") || upper.includes("ORG"))
     return { key: "enterprise", label: "Enterprise", variant: "info", rank: 7, raw };
   if (upper.includes("TEAM") || upper.includes("CHATGPTTEAM"))

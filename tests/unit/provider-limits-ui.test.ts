@@ -29,6 +29,27 @@ test("tier token matching avoids substring false positives", () => {
   assert.equal(providerLimitUtils.normalizePlanTier("Pro").key, "pro");
 });
 
+test("OpenAI Codex prolite plan maps to the paid lite tier, not Unknown", () => {
+  // Live Codex usage endpoint reports workspacePlanType "prolite" (fused).
+  const tier = providerLimitUtils.normalizePlanTier("prolite");
+
+  assert.equal(tier.key, "lite");
+  assert.equal(tier.label, "Pro Lite");
+  assert.equal(tier.variant, "primary");
+  // Spaced/hyphenated/underscored spellings classify identically.
+  assert.equal(providerLimitUtils.normalizePlanTier("Pro Lite").key, "lite");
+  assert.equal(providerLimitUtils.normalizePlanTier("pro-lite").label, "Pro Lite");
+  assert.equal(providerLimitUtils.normalizePlanTier("PRO_LITE").key, "lite");
+  // Unknown-tier keys classify OAuth connections as free (getPurchaseType);
+  // a paid Codex subscription must not land there.
+  assert.notEqual(tier.key, "unknown");
+  assert.notEqual(tier.key, "free");
+  // Boundary guards: neighboring longer words stay Unknown.
+  assert.equal(providerLimitUtils.normalizePlanTier("Proliterate").key, "unknown");
+  // Plain "Pro" is unchanged.
+  assert.equal(providerLimitUtils.normalizePlanTier("Pro").key, "pro");
+});
+
 test("paid individual tiers use non-gray badge variants", () => {
   assert.equal(providerLimitUtils.normalizePlanTier("Plus").variant, "success");
   assert.equal(providerLimitUtils.normalizePlanTier("Pro").variant, "success");
