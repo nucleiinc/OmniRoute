@@ -5,7 +5,8 @@
     "@testing-library/user-event": "Utilitario oficial do ecossistema testing-library para testes de UI (adicionada no PR #11224); Refs #9985.",
     "babel-plugin-react-compiler": "Official React Compiler Babel plugin (facebook/react, MIT). Required peer of Next.js 16 `reactCompiler: true`; Next declares it optional (`*`) and does not auto-install. Added by PR #11783 / issue #67.",
     "eslint-plugin-react-hooks": "React Hooks lint rules (set-state-in-effect, immutability, refs, purity) pinned at 7.0.1 by the release/v3.8.51 cycle; the 224 findings it raised are tracked in #11924. Refs #11924.",
-    "remark-gfm": "GFM extension for remark (remarkjs/remark-gfm, MIT), imported directly as a ReactMarkdown plugin in src/app/(dashboard)/dashboard/playground/components/MarkdownMessage.tsx. Declared explicitly by this fork because it installs with pnpm, which does not hoist undeclared transitive packages the way npm did. Fork-local addition (nucleiinc, commit 71f64b986)."
+    "remark-gfm": "GFM extension for remark (remarkjs/remark-gfm, MIT), imported directly as a ReactMarkdown plugin in src/app/(dashboard)/dashboard/playground/components/MarkdownMessage.tsx. Declared explicitly by this fork because it installs with pnpm, which does not hoist undeclared transitive packages the way npm did. Fork-local addition (nucleiinc, commit 71f64b986).",
+    "use-intl": "Core of next-intl (amannn/next-intl, MIT), pinned to next-intl's own ^4.14.2 range. tests/_setup/vitestUiPolyfills.ts imports createTranslator from \"use-intl/core\" on purpose rather than from next-intl, so the global translator is not self-referential with the vi.mock(\"next-intl\") registered in the same file. Declared explicitly by this fork because it installs with pnpm, which does not expose next-intl's transitive copy the way npm hoisting did; without it all 325 test:vitest:ui files fail to collect. Fork-local addition (nucleiinc)."
   },
   "allowed": [
     "@atjsh/llmlingua-2",
@@ -152,6 +153,7 @@
     "typescript-eslint",
     "undici",
     "update-notifier",
+    "use-intl",
     "uuid",
     "vitest",
     "wait-on",
