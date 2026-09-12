@@ -37,6 +37,18 @@
 //                   ERR_PNPM_INVALID_SELECTOR and the whole install fails, so catching
 //                   them here trades a terse install-time error for a precise one that
 //                   names the offending key and what to do about it.
+//   5. unbound    — a selector whose parent declares no direct `child` edge in the
+//                   INSTALLED tree, so the pin binds nothing even though both manifests
+//                   agree. Needs node_modules; a run without it says so explicitly.
+//
+// KNOWN LIMITATION, stated so nobody mistakes this gate for more than it is. It verifies
+// that each mirrored pin binds SOMETHING, not that the mirror reproduces npm's full
+// subtree coverage. npm's nested override reaches every descendant instance; pnpm's binds
+// one direct edge. A parent with both a direct `foo -> bar` edge and a deeper
+// `foo -> middle -> bar` descendant passes here while the descendant stays unpinned.
+// Proving full coverage means walking the resolved tree for every descendant instance,
+// which is a different and larger tool than manifest comparison.
+//
 //   4. stale      — a DEVIATIONS entry whose npm key upstream has dropped (its recorded
 //                   rationale is now silently false), or one missing a target or reason.
 //                   Mirrors the `assertNoStale` convention in scripts/check/lib/allowlist.mjs.
@@ -218,11 +230,7 @@ export function expectedPnpmOverrides(flatNpm, deviations = DEVIATIONS) {
   const conflicts = [];
   for (const [target, entries] of Object.entries(sources)) {
     if (new Set(entries.map((e) => e.value)).size > 1) {
-      const detail = entries
-        .map(
-          (e) => `${e.npmKey}=${e.value === EMPTY_OVERRIDE ? "<empty object>" : String(e.value)}`
-        )
-        .join(", ");
+      const detail = entries.map((e) => `${e.npmKey}=${show(e.value)}`).join(", ");
       conflicts.push(
         `"${target}" is the deviation target of ${entries.length} npm keys with DIFFERENT ` +
           `values (${detail}); pnpm holds only one, so at least one pin would be a no-op`
@@ -386,7 +394,14 @@ export function findUnboundSelectors(expected, root = ROOT) {
       continue;
     }
     if (dirs.length === 0) continue; // parent absent entirely; nothing to bind, not a lie
+    // A selector may carry a range ("foo@1>bar"). Deciding which installed versions that
+    // range admits needs semver, which this repo does not declare, so be conservative:
+    // when the selector is version-qualified, EVERY installed version of the parent must
+    // declare the child. Otherwise the edge might belong to a version the range excludes,
+    // and borrowing it would validate a selector that binds nothing.
+    const versionQualified = parentSelector !== parentName;
     let bindsSomewhere = false;
+    let bindsEverywhere = true;
     let sawManifest = false;
     for (const dir of dirs) {
       const manifest = path.join(storeDir, dir, "node_modules", parentName, "package.json");
@@ -400,11 +415,20 @@ export function findUnboundSelectors(expected, root = ROOT) {
           ...(pkg.peerDependencies ?? {}),
         };
         if (child in direct) bindsSomewhere = true;
+        else bindsEverywhere = false;
       } catch {
         // an unreadable manifest is not evidence either way
       }
     }
-    if (sawManifest && !bindsSomewhere) {
+    if (sawManifest && versionQualified && bindsSomewhere && !bindsEverywhere) {
+      problems.push(
+        `"${key}" may bind nothing: ${parentName} is installed at more than one version ` +
+          `and only some declare a direct "${child}" dependency, so the edge found may ` +
+          `belong to a version the "${parentSelector}" range excludes. This gate cannot ` +
+          `evaluate the range without semver, so it fails closed. Retarget the selector at ` +
+          `the package that declares "${child}", or record a DEVIATIONS entry`
+      );
+    } else if (sawManifest && !bindsSomewhere) {
       problems.push(
         `"${key}" binds nothing: ${parentName} is installed but declares no direct ` +
           `"${child}" dependency, and pnpm's selector matches only a direct edge. npm's ` +
@@ -483,6 +507,20 @@ export function collectProblems(
   deviations = DEVIATIONS,
   narrowing = DELIBERATE_SCOPE_NARROWING
 ) {
+  return collectReport(npmOverrides, pnpmOverrides, deviations, narrowing).problems;
+}
+
+/**
+ * Same checks as collectProblems, plus whatever could NOT be verified. A caller that
+ * reports "OK" must say what it did not check; dropping that note turns a partial pass
+ * into a claim of approval.
+ */
+export function collectReport(
+  npmOverrides,
+  pnpmOverrides,
+  deviations = DEVIATIONS,
+  narrowing = DELIBERATE_SCOPE_NARROWING
+) {
   const flatNpm = flattenNpmOverrides(npmOverrides);
   const { expected, conflicts } = expectedPnpmOverrides(flatNpm, deviations);
   // An empty-nest marker is reported by findUnsupportedValues; it is not a mirror
@@ -491,15 +529,19 @@ export function collectProblems(
   for (const [key, value] of Object.entries(expected)) {
     if (value !== EMPTY_OVERRIDE) diffable[key] = value;
   }
-  return [
-    ...conflicts,
-    ...findUnmappableKeys(expected),
-    ...findUnsupportedValues(expected),
-    ...findDeviationProblems(flatNpm, deviations),
-    ...findScopeNarrowingProblems(flatNpm, narrowing),
-    ...findUnboundSelectors(expected).problems,
-    ...diffOverrides(diffable, pnpmOverrides),
-  ];
+  const bound = findUnboundSelectors(expected);
+  return {
+    problems: [
+      ...conflicts,
+      ...findUnmappableKeys(expected),
+      ...findUnsupportedValues(expected),
+      ...findDeviationProblems(flatNpm, deviations),
+      ...findScopeNarrowingProblems(flatNpm, narrowing),
+      ...bound.problems,
+      ...diffOverrides(diffable, pnpmOverrides),
+    ],
+    unverified: bound.skipped ? [bound.skipped] : [],
+  };
 }
 
 function main() {
@@ -517,14 +559,40 @@ function main() {
     const { expected } = expectedPnpmOverrides(flattenNpmOverrides(npmOverrides));
     console.error(`  → restore these ${Object.keys(expected).length} key(s) under \`overrides:\`:`);
     for (const [key, value] of Object.entries(expected)) {
-      console.error(`      "${key}": "${String(value)}"`);
+      console.error(`      "${key}": "${show(value)}"`);
     }
     process.exit(1);
   }
 
-  const problems = collectProblems(npmOverrides, pnpmOverrides);
+  const { problems, unverified } = collectReport(npmOverrides, pnpmOverrides);
+  const reportUnverified = () => {
+    for (const note of unverified) {
+      console.error(`[pnpm-overrides-sync] NOT VERIFIED — ${note}.`);
+      console.error(
+        "  → This run is a PARTIAL check. Re-run after `pnpm install` before treating it" +
+          "\n    as approval: a selector that binds nothing cannot be detected without" +
+          "\n    the installed tree."
+      );
+    }
+  };
+
+  // --strict (or PNPM_OVERRIDES_GATE_STRICT=1) refuses to pass on a partial check. The
+  // commit hooks want the lenient form so a fresh clone can still commit; anything that
+  // treats a green run as approval — CI, a release gate — must use strict, because "I
+  // could not check" and "I checked and it is fine" are not the same claim.
+  const strict =
+    process.argv.includes("--strict") || process.env.PNPM_OVERRIDES_GATE_STRICT === "1";
+  if (problems.length === 0 && unverified.length > 0 && strict) {
+    reportUnverified();
+    console.error(
+      "[pnpm-overrides-sync] FAIL (strict) — the mirror matched, but selector edges could" +
+        "\n  not be verified. Run `pnpm install` and re-run."
+    );
+    process.exit(1);
+  }
 
   if (problems.length === 0) {
+    reportUnverified();
     const { expected } = expectedPnpmOverrides(flattenNpmOverrides(npmOverrides));
     console.log(
       `[pnpm-overrides-sync] OK — ${Object.keys(expected).length} override(s) mirrored into pnpm-workspace.yaml`
@@ -536,6 +604,7 @@ function main() {
     `[pnpm-overrides-sync] FAIL — ${problems.length} problem(s) between npm and pnpm overrides:`
   );
   for (const problem of problems) console.error(`  ✗ ${problem}`);
+  reportUnverified();
   console.error(
     "\n  → Upstream changed package.json `overrides`. Mirror the change into" +
       "\n    pnpm-workspace.yaml `overrides`, converting npm's nested form to pnpm's" +

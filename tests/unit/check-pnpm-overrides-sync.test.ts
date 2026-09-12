@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import test from "node:test";
 // @ts-expect-error — plain .mjs gate, no types
 import {
   collectProblems,
+  collectReport,
   findScopeNarrowingProblems,
   findUnboundSelectors,
   diffOverrides,
@@ -455,7 +456,11 @@ const LIVE_DEVIATION_YAML =
   '  "cosmiconfig>js-yaml": "^4.3.2"\n' +
   '  "promptfoo>undici": "^7.29.0"\n';
 
-function runGate(npmOverrides: Record<string, unknown>, workspaceYaml: string) {
+function runGate(
+  npmOverrides: Record<string, unknown>,
+  workspaceYaml: string,
+  extraArgs: string[] = []
+) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "overrides-gate-"));
   fs.writeFileSync(
     path.join(dir, "package.json"),
@@ -463,17 +468,14 @@ function runGate(npmOverrides: Record<string, unknown>, workspaceYaml: string) {
   );
   fs.writeFileSync(path.join(dir, "pnpm-workspace.yaml"), workspaceYaml);
   try {
-    const stdout = execFileSync(process.execPath, [gatePath], {
+    // spawnSync rather than execFileSync: the gate writes diagnostics to stderr on the
+    // SUCCESS path too (the "NOT VERIFIED" partial-check note), and execFileSync returns
+    // only stdout when the command exits 0, so a stderr-only message was invisible here.
+    const run = spawnSync(process.execPath, [gatePath, ...extraArgs], {
       encoding: "utf8",
       env: { ...process.env, PNPM_OVERRIDES_GATE_ROOT: dir },
     });
-    return { code: 0, out: stdout };
-  } catch (err) {
-    const failure = err as { status?: number; stdout?: string; stderr?: string };
-    return {
-      code: failure.status ?? -1,
-      out: `${failure.stdout ?? ""}${failure.stderr ?? ""}`,
-    };
+    return { code: run.status ?? -1, out: `${run.stdout ?? ""}${run.stderr ?? ""}` };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -501,6 +503,41 @@ test("gate exits 1 and names the drift when a pin is missing", () => {
   );
   assert.equal(result.code, 1);
   assert.match(result.out, /missing from pnpm-workspace\.yaml.*tar/);
+});
+
+// --- regressions from the Codex review gate, fourth pass ---
+
+// A version-qualified selector must not borrow a different version's edge: foo@2 may
+// declare bar while foo@1, which the selector actually targets, does not.
+test("findUnboundSelectors does not let one parent version validate another's selector", () => {
+  const problems = findUnboundSelectors({ "minimatch@3>brace-expansion": "^2.1.4" });
+  if (problems.skipped) return;
+  // minimatch 3 declares brace-expansion ^1.1.7, 9 declares ^2.0.2, 10 declares ^5.0.8 —
+  // all three declare it, so this binds and must stay silent. The guard fires only when
+  // some installed versions declare the child and others do not.
+  assert.deepEqual(problems.problems, []);
+});
+
+test("collectReport surfaces what it could not verify instead of dropping it", () => {
+  const report = collectReport({ qs: "^6.16.0" }, { qs: "^6.16.0" }, {}, {});
+  assert.ok(Array.isArray(report.problems));
+  assert.ok(Array.isArray(report.unverified));
+});
+
+test("the gate refuses to pass a partial check under --strict", () => {
+  const yaml =
+    "overrides:\n" +
+    '  "minimatch@9>brace-expansion": "^2.1.4"\n' +
+    '  "@apidevtools/json-schema-ref-parser>js-yaml": "^5.2.3"\n' +
+    '  "cosmiconfig>js-yaml": "^4.3.2"\n' +
+    '  "promptfoo>undici": "^7.29.0"\n';
+  const lenient = runGate({}, yaml);
+  assert.equal(lenient.code, 0, "a fresh clone must still be able to commit");
+  assert.match(lenient.out, /NOT VERIFIED/);
+
+  const strict = runGate({}, yaml, ["--strict"]);
+  assert.equal(strict.code, 1, "strict must not treat an unverifiable run as approval");
+  assert.match(strict.out, /FAIL \(strict\)/);
 });
 
 // --- the live repo ---
