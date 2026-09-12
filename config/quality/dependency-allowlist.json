@@ -1,10 +1,12 @@
 {
   "_comment": "Allowlist anti-slopsquatting (check-deps.mjs). Toda dep nova exige adicao EXPLICITA aqui apos verificar que e legitima.",
   "_justifications": {
+    "@next/env": "Next.js env loader from the Next monorepo (vercel/next.js, MIT), pinned to 16.3.3 to match the repo's next 16.3.3. Declared explicitly by this fork because it installs with pnpm, whose strict node_modules layout does not expose transitive packages that npm hoisting made resolvable from the repo root. Fork-local addition (nucleiinc, commit 71f64b986); no direct import in repo source.",
     "@testing-library/dom": "Peer dep obrigatoria de @testing-library/react v16 (adicionada no PR #11224); Refs #9985.",
     "@testing-library/user-event": "Utilitario oficial do ecossistema testing-library para testes de UI (adicionada no PR #11224); Refs #9985.",
     "babel-plugin-react-compiler": "Official React Compiler Babel plugin (facebook/react, MIT). Required peer of Next.js 16 `reactCompiler: true`; Next declares it optional (`*`) and does not auto-install. Added by PR #11783 / issue #67.",
-    "eslint-plugin-react-hooks": "React Hooks lint rules (set-state-in-effect, immutability, refs, purity) pinned at 7.0.1 by the release/v3.8.51 cycle; the 224 findings it raised are tracked in #11924. Refs #11924."
+    "eslint-plugin-react-hooks": "React Hooks lint rules (set-state-in-effect, immutability, refs, purity) pinned at 7.0.1 by the release/v3.8.51 cycle; the 224 findings it raised are tracked in #11924. Refs #11924.",
+    "remark-gfm": "GFM extension for remark (remarkjs/remark-gfm, MIT), imported directly as a ReactMarkdown plugin in src/app/(dashboard)/dashboard/playground/components/MarkdownMessage.tsx. Declared explicitly by this fork because it installs with pnpm, which does not hoist undeclared transitive packages the way npm did. Fork-local addition (nucleiinc, commit 71f64b986)."
   },
   "allowed": [
     "@atjsh/llmlingua-2",
@@ -19,6 +21,7 @@
     "@lobehub/icons",
     "@modelcontextprotocol/sdk",
     "@monaco-editor/react",
+    "@next/env",
     "@ngrok/ngrok",
     "@opencode-ai/plugin",
     "@playwright/test",
@@ -130,6 +133,7 @@
     "react-markdown",
     "react-reconciler",
     "recharts",
+    "remark-gfm",
     "safe-regex",
     "selfsigned",
     "sharp",
