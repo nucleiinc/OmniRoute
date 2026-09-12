@@ -8,6 +8,8 @@ import test from "node:test";
 // @ts-expect-error — plain .mjs gate, no types
 import {
   collectProblems,
+  findScopeNarrowingProblems,
+  findUnboundSelectors,
   diffOverrides,
   expectedPnpmOverrides,
   findDeviationProblems,
@@ -369,6 +371,69 @@ test("formatting survives a value whose toString is null", () => {
   const problems = diffOverrides({ evil: hostile }, {});
   assert.equal(problems.length, 1);
   assert.match(problems[0], /missing from pnpm-workspace\.yaml: "evil"/);
+});
+
+// --- regressions from the Codex review gate, third pass ---
+
+// The class the manifest comparison structurally cannot see: npm's nested overrides reach
+// descendants at any depth, pnpm's selector binds only a direct edge, so a faithfully
+// mirrored key can pin nothing. This is how lockfile-lint>js-yaml bound nothing while the
+// gate reported every pin mirrored.
+test("findUnboundSelectors flags a selector whose parent has no direct child edge", () => {
+  const { problems, skipped } = findUnboundSelectors({ "libxmljs2>minimatch": "9.0.10" });
+  if (skipped) return; // never installed; the manifest checks stand on their own
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /binds nothing/);
+  assert.match(problems[0], /declares no direct "minimatch"/);
+});
+
+test("findUnboundSelectors accepts a selector that does bind", () => {
+  const { problems, skipped } = findUnboundSelectors({ "cosmiconfig>js-yaml": "^4.3.2" });
+  if (skipped) return;
+  assert.deepEqual(problems, []);
+});
+
+test("findUnboundSelectors ignores a flat key and an absent parent", () => {
+  const { problems, skipped } = findUnboundSelectors({
+    qs: "^6.16.0",
+    "definitely-not-a-real-package-xyz>foo": "^1.0.0",
+  });
+  if (skipped) return;
+  assert.deepEqual(problems, []);
+});
+
+test("findUnboundSelectors reports rather than silently skipping without node_modules", () => {
+  const { problems, skipped } = findUnboundSelectors(
+    { "a>b": "^1.0.0" },
+    path.join(os.tmpdir(), "definitely-not-a-repo-xyz")
+  );
+  assert.deepEqual(problems, []);
+  assert.match(String(skipped), /not present/);
+});
+
+// A narrowing decision is reasoning about a specific npm range. When upstream moves that
+// range the note may no longer describe reality, and the narrowed mirror may now be
+// failing to enforce a new floor on the descendant the note is about.
+test("a scope-narrowing decision expires when npm's range moves under it", () => {
+  const narrowing = { "promptfoo>undici": { npmValue: "^7.29.0", reason: "fixture" } };
+  assert.deepEqual(findScopeNarrowingProblems({ "promptfoo>undici": "^7.29.0" }, narrowing), []);
+
+  const stale = findScopeNarrowingProblems({ "promptfoo>undici": "^8.10.3" }, narrowing);
+  assert.equal(stale.length, 1);
+  assert.match(stale[0], /reasoned about npm's \^7\.29\.0 but package\.json now says \^8\.10\.3/);
+});
+
+test("a scope-narrowing entry without npmValue is rejected", () => {
+  const problems = findScopeNarrowingProblems(
+    { "a>b": "^1.0.0" },
+    { "a>b": { reason: "fixture" } }
+  );
+  assert.ok(problems.some((p: string) => /records no npmValue/.test(p)));
+});
+
+test("diagnostics survive a hostile value nested under npm's . key", () => {
+  const npm = JSON.parse('{"lockfile-lint":{"js-yaml":{".":{"toString":null}}}}');
+  assert.doesNotThrow(() => collectProblems(npm, {}, {}, {}));
 });
 
 // --- end to end: the real script, the real yaml.load, real exit codes ---

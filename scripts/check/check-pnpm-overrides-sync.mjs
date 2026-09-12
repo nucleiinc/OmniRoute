@@ -131,6 +131,7 @@ const DEVIATIONS = {
 // break. Keys are validated against package.json so an entry cannot go stale.
 const DELIBERATE_SCOPE_NARROWING = {
   "promptfoo>undici": {
+    npmValue: "^7.29.0",
     reason:
       "npm's subtree scope would force undici ^7.29.0 onto @apidevtools/json-schema-ref-" +
       "parser@16.0.1, which declares ^8.10.0 and resolves 8.10.2. pnpm's direct-edge match " +
@@ -254,7 +255,7 @@ export function findUnmappableKeys(expected) {
     if (children.length > 0) {
       bad.push(
         `"${key}" is a version-qualified parent that is itself pinned to ` +
-          `${String(expected[key])} while also scoping ${children.length} child pin(s) ` +
+          `${show(expected[key])} while also scoping ${children.length} child pin(s) ` +
           `(${children.join(", ")}). Repinning the parent leaves those child selectors ` +
           `matching a version that is no longer installed, so they bind nothing. Add a ` +
           `DEVIATIONS entry naming the resulting parent version`
@@ -325,12 +326,95 @@ export function findScopeNarrowingProblems(flatNpm, narrowing = DELIBERATE_SCOPE
         `stale DELIBERATE_SCOPE_NARROWING entry "${npmKey}": package.json no longer ` +
           `declares it, so the decision it records no longer applies — remove it`
       );
+      continue;
     }
     if (!entry?.reason) {
       problems.push(`DELIBERATE_SCOPE_NARROWING entry "${npmKey}" has no reason`);
     }
+    // A narrowing decision is a judgement about a SPECIFIC npm range. When upstream moves
+    // that range the recorded reason may no longer describe reality — and the narrowed
+    // mirror may now be failing to enforce a new floor on the very descendant the note
+    // talks about. Expire it, exactly as a value deviation expires.
+    if (entry?.npmValue === undefined) {
+      problems.push(
+        `DELIBERATE_SCOPE_NARROWING entry "${npmKey}" records no npmValue; without it the ` +
+          `decision would outlive the npm range it was reasoned about`
+      );
+    } else if (flatNpm[npmKey] !== entry.npmValue) {
+      problems.push(
+        `DELIBERATE_SCOPE_NARROWING entry "${npmKey}" was reasoned about npm's ` +
+          `${show(entry.npmValue)} but package.json now says ${show(flatNpm[npmKey])}. The ` +
+          `recorded reason may no longer apply, and the narrowed selector may now be ` +
+          `leaving a descendant unpinned. Re-verify, then update npmValue`
+      );
+    }
   }
   return problems.sort();
+}
+
+/**
+ * Verify every `parent>child` selector actually binds to a DIRECT dependency edge in the
+ * installed tree. This is the one class the manifest comparison cannot see: npm's nested
+ * overrides reach descendants at any depth, pnpm's selector binds only a direct edge, so a
+ * faithfully-mirrored key can pin nothing at all. That is how `lockfile-lint>js-yaml`
+ * bound nothing while the gate reported every pin mirrored.
+ *
+ * Needs node_modules, so it is skipped on a tree that has never been installed. The skip is
+ * reported rather than silent: the manifest checks above are complete on their own, and
+ * refusing to commit on a fresh clone would be worse than saying what was not verified.
+ */
+export function findUnboundSelectors(expected, root = ROOT) {
+  const storeDir = path.join(root, "node_modules", ".pnpm");
+  if (!fs.existsSync(storeDir)) {
+    return {
+      problems: [],
+      skipped: "node_modules/.pnpm not present, so selector edges were not verified",
+    };
+  }
+  const problems = [];
+  for (const key of Object.keys(expected)) {
+    if (!key.includes(">")) continue;
+    const [parentSelector, child] = key.split(">");
+    const parentName = parentSelector.replace(/(?!^)@[^@/]*$/, "");
+    const encoded = parentName.replace(/\//g, "+");
+    let dirs = [];
+    try {
+      dirs = fs
+        .readdirSync(storeDir)
+        .filter((d) => d === `${encoded}@` || d.startsWith(`${encoded}@`));
+    } catch {
+      continue;
+    }
+    if (dirs.length === 0) continue; // parent absent entirely; nothing to bind, not a lie
+    let bindsSomewhere = false;
+    let sawManifest = false;
+    for (const dir of dirs) {
+      const manifest = path.join(storeDir, dir, "node_modules", parentName, "package.json");
+      if (!fs.existsSync(manifest)) continue;
+      sawManifest = true;
+      try {
+        const pkg = JSON.parse(fs.readFileSync(manifest, "utf8"));
+        const direct = {
+          ...(pkg.dependencies ?? {}),
+          ...(pkg.optionalDependencies ?? {}),
+          ...(pkg.peerDependencies ?? {}),
+        };
+        if (child in direct) bindsSomewhere = true;
+      } catch {
+        // an unreadable manifest is not evidence either way
+      }
+    }
+    if (sawManifest && !bindsSomewhere) {
+      problems.push(
+        `"${key}" binds nothing: ${parentName} is installed but declares no direct ` +
+          `"${child}" dependency, and pnpm's selector matches only a direct edge. npm's ` +
+          `nested override reaches descendants, so this mirror silently drops the pin. ` +
+          `Retarget it at the package that actually declares "${child}", and record the ` +
+          `decision in DEVIATIONS`
+      );
+    }
+  }
+  return { problems: problems.sort(), skipped: null };
 }
 
 /** DEVIATIONS entries upstream no longer declares, or that omit a target or reason. */
@@ -356,8 +440,8 @@ export function findDeviationProblems(flatNpm, deviations = DEVIATIONS) {
     if (entry?.npmValue !== undefined && npmKey in flatNpm && flatNpm[npmKey] !== entry.npmValue) {
       problems.push(
         `DEVIATIONS entry "${npmKey}" was written against npm's ${entry.npmValue} but ` +
-          `package.json now says ${String(flatNpm[npmKey])}. The override to ` +
-          `${String(entry.value)} may no longer be correct — and if the bump is a new ` +
+          `package.json now says ${show(flatNpm[npmKey])}. The override to ` +
+          `${show(entry.value)} may no longer be correct — and if the bump is a new ` +
           `security floor, keeping the old override would hide it. Reconsider, then update ` +
           `npmValue`
       );
@@ -413,6 +497,7 @@ export function collectProblems(
     ...findUnsupportedValues(expected),
     ...findDeviationProblems(flatNpm, deviations),
     ...findScopeNarrowingProblems(flatNpm, narrowing),
+    ...findUnboundSelectors(expected).problems,
     ...diffOverrides(diffable, pnpmOverrides),
   ];
 }
