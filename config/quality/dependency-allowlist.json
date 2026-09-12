@@ -1,12 +1,17 @@
 {
   "_comment": "Allowlist anti-slopsquatting (check-deps.mjs). Toda dep nova exige adicao EXPLICITA aqui apos verificar que e legitima.",
   "_justifications": {
+    "@formatjs/icu-messageformat-parser": "ICU message parser (formatjs, BSD-3-Clause). Imported by tests/unit/i18n-vi-completeness.test.ts. Reached transitively through next-intl -> use-intl; the same subtree as the use-intl fix, which addressed only its own import site. Fork-local addition (nucleiinc).",
     "@testing-library/dom": "Peer dep obrigatoria de @testing-library/react v16 (adicionada no PR #11224); Refs #9985.",
     "@testing-library/user-event": "Utilitario oficial do ecossistema testing-library para testes de UI (adicionada no PR #11224); Refs #9985.",
     "babel-plugin-react-compiler": "Official React Compiler Babel plugin (facebook/react, MIT). Required peer of Next.js 16 `reactCompiler: true`; Next declares it optional (`*`) and does not auto-install. Added by PR #11783 / issue #67.",
     "eslint-plugin-react-hooks": "React Hooks lint rules (set-state-in-effect, immutability, refs, purity) pinned at 7.0.1 by the release/v3.8.51 cycle; the 224 findings it raised are tracked in #11924. Refs #11924.",
+    "fast-xml-parser": "XML parser (NaturalIntelligence/fast-xml-parser, MIT). Imported by scripts/docs/validate-svg.mjs, re-exported into render-diagrams.mjs behind docs:render-diagrams. Note the existing `overrides` entry for this package is NOT a declaration: it pinned the transitive copy while leaving the direct import unresolvable. Fork-local addition (nucleiinc).",
+    "intl-messageformat": "ICU message formatter (formatjs, BSD-3-Clause). Imported by tests/unit/feature-flag-description-icu-parse-12505.test.ts and i18n-cc-onboarding-placeholder-12302.test.ts. Same next-intl -> use-intl subtree as the entry above. Fork-local addition (nucleiinc).",
     "remark-gfm": "GFM extension for remark (remarkjs/remark-gfm, MIT), imported directly as a ReactMarkdown plugin in src/app/(dashboard)/dashboard/playground/components/MarkdownMessage.tsx. Declared explicitly by this fork because it installs with pnpm, which does not hoist undeclared transitive packages the way npm did. Fork-local addition (nucleiinc, commit 71f64b986).",
-    "use-intl": "Core of next-intl (amannn/next-intl, MIT), pinned to next-intl's own ^4.14.2 range. tests/_setup/vitestUiPolyfills.ts imports createTranslator from \"use-intl/core\" on purpose rather than from next-intl, so the global translator is not self-referential with the vi.mock(\"next-intl\") registered in the same file. Declared explicitly by this fork because it installs with pnpm, which does not expose next-intl's transitive copy the way npm hoisting did; without it all 325 test:vitest:ui files fail to collect. Fork-local addition (nucleiinc)."
+    "tinyglobby": "Glob matcher (SuperchupuDev/tinyglobby, MIT). Imported by scripts/check/check-forgotten-sibling-tests.mjs and scripts/quality/build-test-impact-map.mjs, which back the check:forgotten-sibling-tests gate. Undeclared: npm hoisted it via @typescript-eslint/typescript-estree. Fork-local addition (nucleiinc); without it both gates exit 1 with ERR_MODULE_NOT_FOUND.",
+    "use-intl": "Core of next-intl (amannn/next-intl, MIT), pinned to next-intl's own ^4.14.2 range. tests/_setup/vitestUiPolyfills.ts imports createTranslator from \"use-intl/core\" on purpose rather than from next-intl, so the global translator is not self-referential with the vi.mock(\"next-intl\") registered in the same file. Declared explicitly by this fork because it installs with pnpm, which does not expose next-intl's transitive copy the way npm hoisting did; without it all 325 test:vitest:ui files fail to collect. Fork-local addition (nucleiinc).",
+    "yaml": "YAML parser (eemeli/yaml, ISC). Imported by scripts/quality/validate-release-green.mjs and two unit tests. Pinned to ^2.9.0 deliberately: every call site uses the named `parse` export, which is v2 semantics, and the pnpm store also holds yaml@1.10.3 (CommonJS, no named export) via cosmiconfig, so an unpinned declaration could resolve to the broken major. npm hoisted 2.9.0. Fork-local addition (nucleiinc)."
   },
   "allowed": [
     "@atjsh/llmlingua-2",
@@ -17,6 +22,7 @@
     "@dnd-kit/sortable",
     "@dnd-kit/utilities",
     "@eslint/compat",
+    "@formatjs/icu-messageformat-parser",
     "@huggingface/transformers",
     "@lobehub/icons",
     "@modelcontextprotocol/sdk",
@@ -73,6 +79,7 @@
     "espree",
     "express",
     "fast-check",
+    "fast-xml-parser",
     "fetch-socks",
     "fflate",
     "fumadocs-core",
@@ -86,6 +93,7 @@
     "ink",
     "ink-spinner",
     "ink-text-input",
+    "intl-messageformat",
     "ioredis",
     "jose",
     "js-tiktoken",
@@ -144,6 +152,7 @@
     "tailwind-merge",
     "tailwindcss",
     "tiktoken",
+    "tinyglobby",
     "tsup",
     "tsx",
     "turndown",
@@ -161,6 +170,7 @@
     "ws",
     "wtfnode",
     "xxhash-wasm",
+    "yaml",
     "yazl",
     "zod",
     "zustand"

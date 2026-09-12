@@ -302,6 +302,9 @@ importers:
       "@eslint/compat":
         specifier: ^2.1.0
         version: 2.1.1(eslint@10.10.0(jiti@2.7.0)(supports-color@10.2.2))
+      "@formatjs/icu-messageformat-parser":
+        specifier: ^3.5.17
+        version: 3.5.17
       "@playwright/test":
         specifier: ^1.62.1
         version: 1.62.1
@@ -395,6 +398,9 @@ importers:
       fast-check:
         specifier: ^4.8.0
         version: 4.9.0
+      fast-xml-parser:
+        specifier: ^5.10.1
+        version: 5.11.1
       fumadocs-mdx:
         specifier: ^15.4.0
         version: 15.4.0(@types/mdast@4.0.4)(@types/mdx@2.0.14)(@types/react@19.2.18)(fumadocs-core@16.15.7(@mdx-js/mdx@3.1.1(supports-color@10.2.2))(@types/estree-jsx@1.0.5)(@types/hast@3.0.5)(@types/mdast@4.0.4)(@types/react@19.2.18)(lucide-react@1.41.0(react@19.2.8))(next@16.3.3(@babel/core@7.29.7(supports-color@10.2.2))(@opentelemetry/api@1.9.1)(@playwright/test@1.62.1)(@types/node@26.4.1)(babel-plugin-macros@3.1.0)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(supports-color@10.2.2)(zod@4.5.4))(next@16.3.3(@babel/core@7.29.7(supports-color@10.2.2))(@opentelemetry/api@1.9.1)(@playwright/test@1.62.1)(@types/node@26.4.1)(babel-plugin-macros@3.1.0)(babel-plugin-react-compiler@1.0.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8))(react@19.2.8)(rolldown@1.2.7)(supports-color@10.2.2)(vite@8.2.2(@types/node@26.4.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.13)(yaml@2.9.0))
@@ -407,6 +413,9 @@ importers:
       husky:
         specifier: ^9.1.7
         version: 9.1.7
+      intl-messageformat:
+        specifier: ^11.2.14
+        version: 11.2.14
       jscpd:
         specifier: ^4.3.0
         version: 4.3.0
@@ -449,6 +458,9 @@ importers:
       tailwindcss:
         specifier: ^4.3.0
         version: 4.3.3
+      tinyglobby:
+        specifier: ^0.2.17
+        version: 0.2.17
       type-coverage:
         specifier: ^2.30.1
         version: 2.30.1(typescript@6.0.3)
@@ -470,6 +482,9 @@ importers:
       wtfnode:
         specifier: ^0.10.1
         version: 0.10.1
+      yaml:
+        specifier: ^2.9.0
+        version: 2.9.0
     optionalDependencies:
       "@atjsh/llmlingua-2":
         specifier: 3.0.0
