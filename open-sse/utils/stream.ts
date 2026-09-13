@@ -874,6 +874,33 @@ export function createSSEStream(options: StreamOptions = {}) {
     format: mode === STREAM_MODE.PASSTHROUGH ? clientResponseFormat : sourceFormat,
     fallbackModel: model,
   });
+  // Fallback tool-call source for the synthesized call-log body when the
+  // translate reducer never saw a tool-call chunk to convert (see the call site
+  // in flush()). Reads the client collector's live reducer, which is fed by every
+  // push() regardless of the retention cap, so a long reasoning-heavy stream that
+  // truncates the retained event array still logs its tool calls.
+  // Only meaningful when the client summary is chat-completion shaped, i.e. the
+  // collector's own `format` above resolved to OPENAI.
+  const readToolCallsFromClientSummary = (): ToolCall[] => {
+    if (sourceFormat !== FORMATS.OPENAI) return [];
+    const choices = asRecord(clientPayloadCollector.getSummary()).choices;
+    if (!Array.isArray(choices) || choices.length === 0) return [];
+    const raw = asRecord(asRecord(choices[0]).message).tool_calls;
+    if (!Array.isArray(raw)) return [];
+    return raw.map((entry, i): ToolCall => {
+      const tc = asRecord(entry);
+      const fn = asRecord(tc.function);
+      return {
+        id: tc.id != null ? String(tc.id) : null,
+        index: typeof tc.index === "number" ? tc.index : i,
+        type: typeof tc.type === "string" ? tc.type : "function",
+        function: {
+          name: typeof fn.name === "string" ? fn.name : "",
+          arguments: typeof fn.arguments === "string" ? fn.arguments : "",
+        },
+      };
+    });
+  };
   // Per-stream instances to avoid shared state with concurrent streams
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -2937,7 +2964,21 @@ export function createSSEStream(options: StreamOptions = {}) {
                       },
                     }))
                     .sort((a, b) => a.index - b.index)
-                : [];
+                : // Executors that emit already-client-shaped OpenAI chunks (cursor —
+                  // its response translator is a pass-through, see
+                  // translator/response/cursor-to-openai.ts) never populate
+                  // `state.toolCalls`, which the translate reducer only fills for
+                  // chunks it actually converts. The old `: []` therefore logged a
+                  // tool-calling turn as `finish_reason: "stop"` with no tool_calls
+                  // even though the client received them over the wire — measured
+                  // 0/542 logged tool calls on cursor vs ~94% on every other
+                  // provider, which made cursor undebuggable from call logs.
+                  // clientPayloadCollector already receives every client-visible
+                  // item (emitTranslatedClientItem pushes unconditionally) and its
+                  // reducer ingests on EVERY push regardless of the retention cap,
+                  // so getSummary() sees the real tool calls — same cap-independent
+                  // reasoning as the providerPayload/clientPayload carve-outs below.
+                  readToolCallsFromClientSummary();
               const textualToolCall = parseTextualToolCallFromContent(content);
               if (textualToolCall) {
                 normalizedToolCalls.push({
