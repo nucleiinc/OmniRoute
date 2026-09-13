@@ -33,6 +33,13 @@ import { isRetriableUpstreamFailure } from "./opencodeTransientFailure.ts";
 import { isNetworkRotationSharedEgressGuardEnabled } from "@/shared/utils/featureFlags";
 
 /**
+ * The main OpenCode Zen host, shared by the `opencode` and `opencode-zen`
+ * registry entries. Used to scope the `x-api-key` auth override (#12633) away
+ * from `opencode-go`, which serves a different upstream (`.../zen/go/v1`).
+ */
+const ZEN_BASE_URL = "https://opencode.ai/zen/v1";
+
+/**
  * Per-account proxy configuration, persisted by NoAuthAccountCard under
  * `providerSpecificData.accountProxies` (keyed by the account id, which the UI
  * stores in `providerSpecificData.fingerprints`). Same shape mimocode uses.
@@ -807,6 +814,20 @@ export class OpencodeExecutor extends BaseExecutor {
     }
   }
 
+  /**
+   * #12633: OpenCode Zen's `/v1/responses` endpoint (reached when
+   * `_requestFormat === "openai-responses"`, e.g. Muse Spark Contributor
+   * models) requires `x-api-key`, not `Authorization: Bearer` — unlike the
+   * default `/chat/completions` endpoint on the same host, which accepts
+   * Bearer. Scoped by baseUrl (not provider id/alias) so this only applies to
+   * the main Zen host (`opencode` / `opencode-zen`, both `https://opencode.ai/zen/v1`)
+   * and never to opencode-go, which serves Responses-format models from a
+   * different upstream (`https://opencode.ai/zen/go/v1`) that expects Bearer.
+   */
+  private usesZenApiKeyAuth(): boolean {
+    return this._requestFormat === "openai-responses" && this.config?.baseUrl === ZEN_BASE_URL;
+  }
+
   buildHeaders(
     credentials: ProviderCredentials | null,
     stream = true,
@@ -823,7 +844,7 @@ export class OpencodeExecutor extends BaseExecutor {
       : undefined;
 
     if (key) {
-      if (this._requestFormat === "claude") {
+      if (this._requestFormat === "claude" || this.usesZenApiKeyAuth()) {
         headers["x-api-key"] = key;
       } else {
         headers["Authorization"] = `Bearer ${key}`;

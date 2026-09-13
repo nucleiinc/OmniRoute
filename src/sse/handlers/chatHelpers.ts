@@ -8,6 +8,7 @@ import {
   markAccountUnavailable,
   buildExhaustionOptions,
 } from "../services/auth";
+import { maybeReactivateAfterExplicitProbe } from "../services/explicitInactiveProbe";
 import { connectionHasExtraKeys } from "@omniroute/open-sse/services/apiKeyRotator.ts";
 import { createBuiltinAutoCombo } from "@omniroute/open-sse/services/autoCombo/builtinCatalog.ts";
 import * as log from "../utils/logger";
@@ -338,7 +339,15 @@ export async function resolveModelOrError(
     log.info("ROUTING", `Provider: ${provider}, Model: ${model}${ctxTag}`);
   }
 
-  return { provider, model, sourceFormat, targetFormat, extendedContext, apiFormat };
+  return {
+    provider,
+    model,
+    sourceFormat,
+    targetFormat,
+    customModelTargetFormat,
+    extendedContext,
+    apiFormat,
+  };
 }
 
 export async function checkPipelineGates(
@@ -447,6 +456,7 @@ export async function executeChatWithBreaker({
   // for every non-video request. Passed straight through to handleChatCore;
   // see its own destructure default for the shape and consumers.
   videoBridgeLog = undefined,
+  fallbackAttempts = undefined,
 }: ExecuteChatWithBreakerOptions): Promise<ExecuteChatWithBreakerResult> {
   let tlsFingerprintUsed = false;
   const normalizedTrafficType: TrafficType =
@@ -507,6 +517,7 @@ export async function executeChatWithBreaker({
             reasoningTransportFallback,
             managedLease,
             videoBridgeLog,
+            fallbackAttempts,
             skipResourcePressureGuard: true,
             onCredentialsRefreshed: async (newCreds: any) => {
               await updateProviderCredentials(credentials.connectionId, {
@@ -525,6 +536,13 @@ export async function executeChatWithBreaker({
             onRequestSuccess: async () => {
               if (isShadowTraffic) return;
               await clearAccountError(credentials.connectionId, credentials);
+              await maybeReactivateAfterExplicitProbe({
+                connectionId: credentials.connectionId,
+                reactivatedFromInactive: credentials.reactivatedFromInactive,
+                isShadowTraffic,
+                requestedModel: model,
+                provider,
+              });
             },
             onStreamFailure: async (failure: any) => {
               if (isShadowTraffic) return;

@@ -99,6 +99,7 @@ export { MODEL_LOCKOUT_EVICTION_CAP } from "./accountFallback/lockoutEviction.ts
 import { capScaledCooldownMs } from "./accountFallback/cooldownCap.ts";
 import { resolveApiKeyForbiddenFallback } from "./accountFallback/nonRetryableUpstream.ts";
 import * as exactModelLock from "./accountFallback/exactModelLock.ts";
+import { isCreditsExhaustedWithSharedWallet } from "./accountFallback/sharedWalletCredits.ts";
 export type ProviderProfile = {
   baseCooldownMs: number;
   useUpstreamRetryHints: boolean;
@@ -262,6 +263,7 @@ export const OAUTH_INVALID_TOKEN_SIGNALS = [
   "login cookie",
   "valid authentication credential",
   "invalid credentials",
+  "re-authenticate your cline account",
 ];
 
 // A model that upstream has permanently retired — Gemini's deprecated-model 404
@@ -374,7 +376,7 @@ export const MODEL_ACCESS_DENIED_PATTERNS = [
   /\bunsupported\s+model\b/i,
   /\baccess.*denied.*model\b/i,
   /\bmodel.*access.*denied\b/i,
-  /\bplease select a different model\b/i,
+  /\bplease select a different model\b/i, /\bunknown\s+provider\s+for\s+model\b/i,
   // "...access to the requested model" / "model ... access" — bounded lookahead
   // (no nested quantifiers) so it stays ReDoS-safe while requiring BOTH an
   // access/permission word and "model" so a pure auth error never matches.
@@ -414,7 +416,7 @@ const PROVIDER_MODEL_UNSUPPORTED_PATTERNS = [
   /\bmodel\b[\s\S]{0,80}?\b(?:does\s+not\s+support|doesn't\s+support|unsupported)\b/i,
   /\b(?:does\s+not\s+support|doesn't\s+support|unsupported)\b[\s\S]{0,80}?\bmodel\b/i,
   /\bunsupported\s+model\b/i,
-  /\bplease select a different model\b/i,
+  /\bplease select a different model\b/i, /\bunknown\s+provider\s+for\s+model\b/i,
 ];
 
 /**
@@ -485,8 +487,7 @@ export function isAccountDeactivated(errorText: string): boolean {
  * T10: Returns true if response body indicates credits/quota are permanently exhausted.
  */
 export function isCreditsExhausted(errorText: string): boolean {
-  const lower = String(errorText || "").toLowerCase();
-  return CREDITS_EXHAUSTED_SIGNALS.some((sig) => lower.includes(sig));
+  return isCreditsExhaustedWithSharedWallet(errorText, CREDITS_EXHAUSTED_SIGNALS);
 }
 
 /**
