@@ -495,7 +495,17 @@ if (existsSync(opencodePluginSrc) && existsSync(join(opencodePluginSrc, "package
       // install never populates its node_modules — and tsup with `dts: true`
       // needs the plugin's own devDependencies (typescript, @opencode-ai/plugin
       // types). Without this install a fresh CI publish fails at this step.
-      if (!existsSync(join(opencodePluginSrc, "node_modules"))) {
+      // Gate on the build TOOLS resolving, not on node_modules merely existing.
+      // A prod-only or interrupted install leaves the directory present with
+      // just the runtime dep (`zod`) and none of the devDependencies. The old
+      // existsSync check read that as "already installed" and skipped ahead, so
+      // `tsup` fell through to npx's cache — which has no `typescript` — and the
+      // build died with "Cannot find module 'typescript'" after the Next build
+      // had already succeeded, leaving dist/ assembled but the plugin missing.
+      const pluginModules = join(opencodePluginSrc, "node_modules");
+      const pluginToolingInstalled =
+        existsSync(join(pluginModules, "tsup")) && existsSync(join(pluginModules, "typescript"));
+      if (!pluginToolingInstalled) {
         // The plugin's node_modules is gitignored, so a fresh CI checkout
         // ALWAYS installs here. The registry CDN is intermittently flaky
         // (onnxruntime-class ETIMEDOUTs to the Microsoft CDN have repeatedly
