@@ -30,8 +30,12 @@ export function stripContextWindowSuffix(
 // The alias map and its resolver moved to ./providerAlias.ts, which reaches the
 // provider catalog but no node builtin. They are pure lookups, but living here
 // meant a client component importing the resolver also pulled this module's
-// server chain (readCache → settings → usageDb → apiKeys → rateLimiter →
-// ioredis) into the browser bundle, failing the production build on `dns`/`net`.
+// server chain into the browser bundle, failing the production build on
+// `dns`/`net`. That chain is reached through the lazy `await import(
+// "@/lib/db/readCache")` calls below, not a static import — this module's
+// static graph is clean. The bundler still has to resolve a dynamic import to
+// split the chunk, so a lazy edge breaks the client build just as a static one
+// does; it only defers when the resolution happens, not whether.
 // Both are used internally here; only `resolveProviderAlias` is re-exported,
 // because that is all this module exported before the move. The map stays
 // module-private, as it was — exporting it would widen the public API to a
@@ -616,8 +620,8 @@ async function resolveModelByProviderInference(modelId: string, extendedContext:
   //
   // A literal `activeProviders?.has("opencode")` check is unreachable in
   // practice: `getActiveProviderSet()` canonicalizes every connection's
-  // provider id through `resolveProviderAlias()`, and the manual override
-  // above (`ALIAS_TO_PROVIDER_ID["opencode"] = "opencode-zen"`) rewrites any
+  // provider id through `resolveProviderAlias()`, and the manual override in
+  // providerAlias.ts (`ALIAS_TO_PROVIDER_ID["opencode"] = "opencode-zen"`) rewrites any
   // "opencode" id to "opencode-zen" before it ever reaches the active set —
   // so an active no-auth opencode connection never appears as "opencode".
   // Check both opencode-family canonical ids that catalog this model id.

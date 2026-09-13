@@ -3,12 +3,13 @@
  *
  * `resolveProviderAlias` and the alias map it reads are pure lookups over
  * `PROVIDER_ID_TO_ALIAS`: no I/O, no database, no network. They lived in
- * `services/model.ts`, which reaches the DB and Redis transitively
- * (model.ts → readCache → settings → runtimeSettings → usageTracking →
- * usageDb → usageStats → apiKeys → rateLimiter → ioredis), so any client
- * component importing the resolver dragged that whole chain into the browser
- * bundle and the production build failed on unresolvable node builtins
- * (`dns`, `net`, `fs`, `child_process`).
+ * `services/model.ts`, which reaches the DB and Redis through its lazy
+ * `await import("@/lib/db/readCache")` calls (readCache → settings →
+ * runtimeSettings → usageTracking → usageDb → usageStats → apiKeys →
+ * rateLimiter → ioredis). A dynamic import still has to be resolved so the
+ * bundler can split the chunk, so any client component importing the resolver
+ * dragged that chain into the browser build and it failed on unresolvable node
+ * builtins (`dns`, `net`, `fs`, `child_process`).
  *
  * This module is browser-COMPATIBLE, not a dependency leaf. It still reaches
  * ~310 repo modules through the provider catalog
