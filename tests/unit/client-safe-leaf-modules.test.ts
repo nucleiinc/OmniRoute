@@ -31,7 +31,16 @@ const CLIENT_SAFE_LEAVES = [
   "open-sse/utils/cursorAgentCliVersionPin.ts",
 ];
 
-/** Bare builtins that must never appear, with or without a `node:` scheme. */
+/**
+ * Bare builtins that must never appear, with or without a `node:` scheme.
+ *
+ * webpack 5 and Turbopack do NOT auto-polyfill node builtins for the browser
+ * target, so any of these resolving into a client graph is a hard build error.
+ * The list is curated rather than derived from `node:module`'s builtinModules,
+ * because a few names there (`buffer`, `events`, `util`, `url`, `process`) have
+ * long-standing browser shims that Next still provides — flagging those would
+ * produce failures the build itself would not.
+ */
 const FORBIDDEN_BUILTINS = new Set([
   "fs",
   "path",
@@ -39,11 +48,23 @@ const FORBIDDEN_BUILTINS = new Set([
   "net",
   "dns",
   "tls",
+  "http",
+  "https",
   "http2",
+  "crypto",
   "child_process",
+  "worker_threads",
+  "cluster",
+  "dgram",
   "async_hooks",
+  "perf_hooks",
   "inspector",
   "readline",
+  "repl",
+  "tty",
+  "v8",
+  "vm",
+  "zlib",
   "module",
 ]);
 
