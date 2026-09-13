@@ -1,6 +1,9 @@
 import { normalizeComboModels, type ComboStep } from "./steps";
 import { resolveComboTargetModelStr } from "../../../open-sse/services/combo/opencodeTargetAlias.ts";
-import { resolveProviderAlias } from "../../../open-sse/services/model.ts";
+// providerAlias.ts, not services/model.ts: this module is imported by the
+// "use client" ComboControlCenterClient, and model.ts reaches ioredis/sqlite
+// transitively, which breaks the production client bundle on `dns`/`net`.
+import { resolveProviderAlias } from "../../../open-sse/services/providerAlias.ts";
 
 type JsonRecord = Record<string, unknown>;
 
