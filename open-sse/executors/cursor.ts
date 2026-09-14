@@ -339,6 +339,30 @@ export type StreamCtx = {
   // True once we've emitted structured tool_calls from the inline Composer parser
   // (to avoid double-emitting if the block appears in multiple accumulated frames).
   composerInlineToolCallsEmitted: boolean;
+  // Upstream failures that arrived AFTER visible text had already been streamed
+  // and were therefore deliberately not surfaced to the client (the three
+  // discard sites: processFrame's JSON error envelope, and execute()'s two
+  // benign-cancel branches). Populated by noteSuppressedUpstreamError purely so
+  // the discard is observable — in logs, and assertable in tests. Nothing reads
+  // this to decide what the stream emits, so the termination contract pinned by
+  // tests/unit/cursor-streaming.test.ts is unchanged.
+  suppressedErrors: SuppressedUpstreamError[];
+};
+
+/** One upstream failure that was swallowed because text had already streamed. */
+export type SuppressedUpstreamError = {
+  /** Which discard site swallowed it. */
+  stage: "json_error_frame" | "benign_cancel_stream" | "benign_cancel_buffered";
+  /** Classified message, additionally run through sanitizeErrorMessage. */
+  message: string;
+  /** HTTP status the client would have seen had the error been surfaced. */
+  status: number;
+  /** Visible text already emitted when the error arrived — why it was dropped. */
+  emittedTextLength: number;
+  /** Tool calls already emitted at that point. */
+  emittedToolCalls: number;
+  /** endReason in force when the error was swallowed. */
+  endReason: StreamCtx["endReason"];
 };
 
 export function newStreamCtx(model: string, emit: (chunk: string) => void): StreamCtx {
@@ -362,7 +386,89 @@ export function newStreamCtx(model: string, emit: (chunk: string) => void): Stre
     composerVisibleEmittedLength: 0,
     composerToolParserState: isComposerModel(model) ? createStreamingState() : null,
     composerInlineToolCallsEmitted: false,
+    suppressedErrors: [],
   };
+}
+
+/**
+ * Replace every absolute URL in a diagnostic string with a marker.
+ *
+ * sanitizeErrorMessage knows a long list of credential SHAPES (Bearer/Basic
+ * headers, `api_key=` style assignments, cookies, JWTs, AWS/CloudFront/Azure
+ * signatures) but a URL can carry a secret in arbitrarily many ways it does not
+ * enumerate — `?auth=…` query parameters, percent-encoded tokens inside a path,
+ * and opaque session-token path segments all survive it. Enumerating those
+ * shapes is a losing game, so drop the whole URL instead: in an upstream error
+ * the surrounding prose carries the diagnostic value, not the endpoint.
+ *
+ * The pattern is deliberately flat — one bounded scheme class, then a single
+ * quantifier over a negated character class — so it cannot backtrack
+ * catastrophically on hostile input (AGENTS.md → PII learnings, "Regex
+ * Security (ReDoS)"). Protocol-relative (`//host/path`) and bare `host/path`
+ * forms are NOT matched: too likely to eat ordinary prose, and they cannot
+ * carry a userinfo credential.
+ */
+const ABSOLUTE_URL_PATTERN = /\b[a-z][a-z0-9+.-]{0,31}:\/\/[^\s"'<>\\]{0,2048}/gi;
+
+function stripUrlsFromDiagnostic(message: string): string {
+  return message.replace(ABSOLUTE_URL_PATTERN, "[URL REDACTED]");
+}
+
+/**
+ * Record and log an upstream failure that is deliberately NOT surfaced to the
+ * client because visible text had already been streamed. Cursor has three such
+ * sites (processFrame's JSON error envelope, and execute()'s two benign-cancel
+ * branches); before this helper none of them logged anything at all, so
+ * CURSOR_DEBUG=1 printed nothing and the call log recorded an ordinary "stop" —
+ * the swallow was unobservable by construction, which is exactly what made a
+ * production narration-then-stop report impossible to confirm or rule out from
+ * logs.
+ *
+ * `console.warn` rather than debugLog alone is deliberate: a flag-gated line
+ * only helps an operator who already suspects this path and has restarted the
+ * gateway with the flag set, and this class of failure is diagnosed after the
+ * fact. Mirrors the always-on hardening warn for empty assistant responses in
+ * open-sse/utils/stream.ts. debugLog additionally carries the structured record
+ * for anyone who does have the flag on.
+ *
+ * Observability only: callers must set endReason themselves, and nothing here
+ * changes what is emitted.
+ */
+export function noteSuppressedUpstreamError(
+  ctx: StreamCtx,
+  stage: SuppressedUpstreamError["stage"],
+  classified: { message: string; status: number }
+): void {
+  const entry: SuppressedUpstreamError = {
+    stage,
+    // Two-stage redaction, both applied HERE rather than at each of the three
+    // call sites so no future site can forget either.
+    //
+    // 1. stripUrlsFromDiagnostic drops whole URLs, which can smuggle a secret in
+    //    more ways than any shape list enumerates (see its doc comment).
+    // 2. sanitizeErrorMessage then handles the credential shapes in the
+    //    remaining prose. classifyCursorError is secret-safe for cursor's own
+    //    error vocabulary but does NOT strip ordinary credentials — an
+    //    `Authorization: Bearer <token>` or `api_key=…` echoed back inside an
+    //    upstream message survives it.
+    //
+    // Both the record and the warn below reach disk through
+    // src/lib/consoleInterceptor.ts and are served by the authenticated
+    // console-log API, so this is required by AGENTS.md Hard Rule #12
+    // (docs/security/ERROR_SANITIZATION.md).
+    message: sanitizeErrorMessage(stripUrlsFromDiagnostic(classified.message)),
+    status: classified.status,
+    emittedTextLength: ctx.totalText.length,
+    emittedToolCalls: ctx.toolCalls.length,
+    endReason: ctx.endReason,
+  };
+  ctx.suppressedErrors.push(entry);
+  console.warn(
+    `[CURSOR] upstream error suppressed (stage=${entry.stage} status=${entry.status} ` +
+      `endReason=${entry.endReason} emittedTextChars=${entry.emittedTextLength} ` +
+      `emittedToolCalls=${entry.emittedToolCalls}): ${entry.message}`
+  );
+  debugLog("[cursor-agent] suppressed upstream error:", entry);
 }
 
 function emitChunk(ctx: StreamCtx, delta: object, finishReason: string | null = null) {
@@ -523,8 +629,13 @@ export function processFrame(
       ctx.midStreamError = jsonError;
       ctx.endReason = "server_end";
     } else {
-      // Already streamed content — terminate cleanly.
+      // Already streamed content — terminate cleanly. The error is intentionally
+      // NOT promoted to midStreamError (finalizeSseStream would then replace the
+      // text the client has already received with an error chunk); the contract
+      // is pinned by tests/unit/cursor-streaming.test.ts. Record it so the
+      // swallow is at least observable.
       ctx.endReason = "server_end";
+      noteSuppressedUpstreamError(ctx, "json_error_frame", jsonError);
     }
     return;
   }
@@ -1489,6 +1600,11 @@ export class CursorExecutor extends BaseExecutor {
                 isCursorBenignCancelError(err) &&
                 (ctx.totalText.length > 0 || ctx.pendingToolCalls.size > 0)
               ) {
+                noteSuppressedUpstreamError(
+                  ctx,
+                  "benign_cancel_stream",
+                  classifyCursorError(err instanceof Error ? err.message : String(err))
+                );
                 this.finalizeSseStream(ctx, body);
                 finishLifecycle(ctx, false);
                 controller.close();
@@ -1525,6 +1641,11 @@ export class CursorExecutor extends BaseExecutor {
         isCursorBenignCancelError(err) &&
         (ctx.totalText.length > 0 || ctx.pendingToolCalls.size > 0)
       ) {
+        noteSuppressedUpstreamError(
+          ctx,
+          "benign_cancel_buffered",
+          classifyCursorError(err instanceof Error ? err.message : String(err))
+        );
         finishLifecycle(ctx, false);
         return {
           response: this.buildResponseFromCtx(ctx, body),

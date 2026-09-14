@@ -5481,6 +5481,10 @@ export async function handleChatCore({
         body: bodyForCacheWrite,
         headers: clientRawRequest?.headers,
         translatedResponse,
+        // An upstream that answered this non-streaming request with an event stream had its
+        // body REASSEMBLED (sseParser), which carries the same tool-call name defect the
+        // streaming store guards against — don't cache a reconstruction.
+        reconstructedFromEventStream: looksLikeSSE,
         model,
         apiKeyId: apiKeyInfo?.id ?? undefined,
         usage,

@@ -5,8 +5,10 @@
  * Extracted from handleChatCore's non-streaming success path (Phase 9.1): when semantic caching is
  * enabled and the request/response are cacheable, store the translated response under its signature
  * so a later temp=0 request can be served from cache. Side-effect only (cache write + debug log);
- * no early-return, no outer-variable reassignment. Behaviour is byte-identical to the previous
- * inline block, including the `prompt + completion || 0` token-saved precedence.
+ * no early-return, no outer-variable reassignment. Behaviour matches the previous
+ * inline block, including the `prompt + completion || 0` token-saved precedence — with ONE
+ * deliberate divergence: a response reassembled from an upstream event stream is no longer
+ * written (see `reconstructedFromEventStream` below).
  */
 import {
   generateSignature as defaultGenerateSignature,
@@ -49,6 +51,24 @@ export function storeSemanticCacheResponse(
     body: CacheBody;
     headers: unknown;
     translatedResponse: unknown;
+    /**
+     * True when `translatedResponse` was REASSEMBLED from an upstream event stream rather than
+     * parsed from a whole JSON body — `looksLikeSSE` at the call site, set when a provider
+     * answers a non-streaming request with `text/event-stream`/NDJSON
+     * (`nonStreamingResponseParse.ts:74-119`). Such a body is a reconstruction and carries the
+     * same accumulator defect the streaming store guards against: `sseParser.ts:237` seeds a
+     * missing tool-call name with the literal `"unknown"` and the backfill at `:244` only
+     * replaces a falsy name, so `"unknown"` survives into the cached body and is served verbatim
+     * on a later HIT.
+     *
+     * Guarded on the RECONSTRUCTION rather than on tool-call shape (the streaming store's
+     * narrowing) on purpose: `translatedResponse` is already in the CLIENT's format, so a
+     * shape-keyed check would have to recognize OpenAI `choices[].message.tool_calls`, Claude
+     * `content[].type === "tool_use"`, Gemini `functionCall` parts and Responses `function_call`
+     * items, and would silently pass anything it failed to recognize. A body parsed from real
+     * provider JSON (the overwhelmingly common path) is not a reconstruction and still caches.
+     */
+    reconstructedFromEventStream?: boolean;
     model: string;
     apiKeyId?: string;
     usage?: UsageLike;
@@ -58,6 +78,7 @@ export function storeSemanticCacheResponse(
 ): void {
   if (
     !args.enabled ||
+    args.reconstructedFromEventStream === true ||
     !deps.isCacheableForWrite(args.body, args.headers) ||
     !deps.isSmallEnoughForSemanticCache(args.translatedResponse)
   ) {
